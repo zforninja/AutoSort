@@ -93,7 +93,7 @@ function api.get_settings()
             end
             return c
         end)(),
-        categories = { 'Weapon', 'Armor', 'Food', 'Usable', 'Crystal', 'Currency', 'General' },
+        categories = { 'Weapon', 'Armor', 'Ranged', 'Ammo', 'Food', 'Usable', 'Crystal', 'Currency', 'General' },
     }
 end
 
@@ -111,6 +111,18 @@ function api.save_settings(data)
     end
     if tonumber(data.port) then
         state.settings.port = tonumber(data.port)
+    end
+    -- mule_bag may be a string (bag key) or explicit null to clear it.
+    if data.mule_bag ~= nil then
+        state.settings.mule_bag = (data.mule_bag == '' ) and nil or data.mule_bag
+    elseif data.clear_mule_bag then
+        state.settings.mule_bag = nil
+    end
+    if type(data.icon_base_url) == 'string' then
+        state.settings.icon_base_url = data.icon_base_url
+    end
+    if data.show_icons ~= nil then
+        state.settings.show_icons = data.show_icons and true or false
     end
 
     local ok, err = config.save(state.settings)

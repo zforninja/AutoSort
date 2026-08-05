@@ -49,6 +49,12 @@ function config.defaults()
         enabled_bags = enabled,
         rules = {},
         mule_bag = nil,  -- Optional: designate one bag as your "mule outbox"
+        -- Base URL for item icons. Icons are addressed by item id:
+        --   <icon_base_url><item_id>.png
+        -- FFXIAH hosts every item icon at a predictable id-based path, so no
+        -- scraping is needed. Set to "" to disable icons entirely.
+        icon_base_url = 'https://static.ffxiah.com/images/icon/',
+        show_icons = true,       -- master toggle for item icons in the UI
     }
 end
 
@@ -96,6 +102,12 @@ local function sanitize(settings)
     else
         settings.mule_bag = nil
     end
+
+    -- icon settings
+    if type(settings.icon_base_url) ~= 'string' then
+        settings.icon_base_url = defaults.icon_base_url
+    end
+    settings.show_icons = (settings.show_icons ~= false)
 
     return settings
 end

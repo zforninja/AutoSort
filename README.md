@@ -10,6 +10,7 @@ AutoSort moves items across every FFXI storage container using rules you define,
 
 - **Local Web UI** at `http://127.0.0.1:9898` — opens in your normal browser when the add‑on loads.
 - **Inventory Status** — live view of every enabled bag, slot usage, and contents.
+- **Item icons & tooltips** — every item row (in Status *and* the move preview) shows its real FFXI icon, and hovering reveals a rich tooltip (category, slot, level, usable jobs, description/stats, item ID) so you can make informed sorting decisions at a glance.
 - **Bag Settings** — toggle exactly which of the 16 storage containers you own (Wardrobe 3–8, Locker, Satchel, Sack, etc.).
 - **Sort Rules** — map item **names** (with `*` wildcards) or **categories** to a target bag. Rules are evaluated top‑to‑bottom, first match wins. **No default rules — you define everything.**
 - **Preview & Execute** — see every planned move, per‑bag capacity impact (before → after, with over‑capacity warnings), and a list of unmatched items *before* anything moves.
@@ -156,6 +157,22 @@ AutoSort/
 | POST | `/api/execute` | Begin executing the last previewed plan |
 | GET | `/api/progress` | Live execution progress + log |
 | POST | `/api/stop` | Abort a running sort |
+
+---
+
+## Item icons & descriptions
+
+AutoSort shows a real icon and a detailed tooltip for every item, in both the **Inventory Status** list and the **Preview** move plan. This is done without any scraping or bundled asset packs:
+
+- **Descriptions & attributes come from Windower locally.** The add‑on reads Windower's built‑in `resources` library (`res.items[id]`) to pull each item's description, level, item level, usable jobs, equippable slots, and weapon skill. This is instant, offline, and always in sync with your client.
+- **Icons load by item ID from the FFXIAH CDN.** The UI builds each icon URL as `<icon_base_url><item_id>.png` (default `https://static.ffxiah.com/images/icon/`). Nothing is scraped — the browser just requests the icon for the ID directly. If an icon fails to load, the row falls back to a lettered placeholder.
+
+Two settings control this (Bag Settings tab, or `data/settings.json`):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `show_icons` | `true` | Show item icons + hover tooltips. Set `false` for a text‑only list. |
+| `icon_base_url` | `https://static.ffxiah.com/images/icon/` | Base URL icons are loaded from. Point it at any host that serves `<id>.png` (e.g. a local mirror) if you'd rather not hit the CDN. |
 
 ---
 

@@ -76,6 +76,86 @@ function nameForBag(key) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Item icons + description tooltip                                    */
+/* ------------------------------------------------------------------ */
+
+// Build the icon URL for an item id from the configured base URL.
+// Returns null when icons are disabled or no base URL / id is available.
+function iconUrl(id) {
+    if (!state.settings || state.settings.show_icons === false) return null;
+    const base = state.settings.icon_base_url;
+    if (!base || id == null) return null;
+    return base + id + '.png';
+}
+
+// Create an icon element for an item, with a graceful fallback placeholder
+// (the item's first letter) if the CDN image is missing or icons are off.
+function makeIcon(item) {
+    const wrap = el('span', { class: 'item-icon' });
+    const url = iconUrl(item.id);
+    const placeholder = () => {
+        wrap.classList.add('item-icon-ph');
+        wrap.textContent = (item.name || '?').charAt(0).toUpperCase();
+    };
+    if (!url) { placeholder(); return wrap; }
+    const img = el('img', { src: url, alt: item.name || '', loading: 'lazy' });
+    img.addEventListener('error', () => { wrap.innerHTML = ''; placeholder(); });
+    wrap.appendChild(img);
+    return wrap;
+}
+
+// Shared floating tooltip element (created once).
+let _tip = null;
+function ensureTip() {
+    if (!_tip) {
+        _tip = el('div', { class: 'item-tip hidden' });
+        document.body.appendChild(_tip);
+    }
+    return _tip;
+}
+
+// Build the tooltip HTML for an item from its metadata.
+function tipHtml(item) {
+    const rows = [];
+    rows.push(`<div class="tip-head">${esc(item.name || 'Unknown')}</div>`);
+    const meta = [];
+    if (item.category) meta.push(esc(item.category));
+    if (item.slots) meta.push(esc(item.slots));
+    if (item.level) meta.push('Lv.' + esc(item.level));
+    if (item.item_level) meta.push('iLv.' + esc(item.item_level));
+    if (meta.length) rows.push(`<div class="tip-meta">${meta.join(' · ')}</div>`);
+    if (item.jobs) rows.push(`<div class="tip-jobs">${esc(item.jobs)}</div>`);
+    if (item.description) rows.push(`<div class="tip-desc">${esc(item.description)}</div>`);
+    else rows.push(`<div class="tip-desc tip-dim">No description available.</div>`);
+    if (item.id != null) rows.push(`<div class="tip-id">Item ID: ${esc(item.id)}</div>`);
+    return rows.join('');
+}
+
+// Wire hover/focus behaviour on a row element to show the item tooltip.
+function attachTip(node, item) {
+    const show = (e) => {
+        const tip = ensureTip();
+        tip.innerHTML = tipHtml(item);
+        tip.classList.remove('hidden');
+        moveTip(e);
+    };
+    const moveTip = (e) => {
+        const tip = ensureTip();
+        const pad = 14;
+        let x = e.clientX + pad, y = e.clientY + pad;
+        const r = tip.getBoundingClientRect();
+        if (x + r.width > window.innerWidth) x = e.clientX - r.width - pad;
+        if (y + r.height > window.innerHeight) y = e.clientY - r.height - pad;
+        tip.style.left = Math.max(4, x) + 'px';
+        tip.style.top = Math.max(4, y) + 'px';
+    };
+    const hide = () => { ensureTip().classList.add('hidden'); };
+    node.addEventListener('mouseenter', show);
+    node.addEventListener('mousemove', moveTip);
+    node.addEventListener('mouseleave', hide);
+}
+
+/* ------------------------------------------------------------------ */
 /* Tabs                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -137,11 +217,14 @@ function renderStatus(bags) {
             itemsWrap.appendChild(el('div', { class: 'empty' }, 'Empty'));
         } else {
             bag.items.forEach(it => {
-                itemsWrap.appendChild(el('div', { class: 'item-row' },
-                    el('span', {}, it.name),
+                const row = el('div', { class: 'item-row' },
+                    makeIcon(it),
+                    el('span', { class: 'item-name' }, it.name),
                     el('span', { class: 'item-cat' }, it.category),
                     el('span', { class: 'item-qty' }, '×' + it.count),
-                ));
+                );
+                attachTip(row, it);
+                itemsWrap.appendChild(row);
             });
         }
         const card = el('div', { class: 'bag-card' }, head, itemsWrap);
@@ -211,7 +294,9 @@ function populateMuleBagDropdown() {
 
 async function saveBagSettings() {
     state.settings.move_delay = parseFloat($('#move-delay').value) || 0.7;
-    state.settings.mule_bag = $('#mule-bag').value || null;
+    // Send '' (empty string) rather than null so the Lua backend reliably
+    // clears the mule bag — JSON null can decode to an absent key in Lua.
+    state.settings.mule_bag = $('#mule-bag').value || '';
     try {
         const res = await api('settings', 'POST', {
             enabled_bags: state.settings.enabled_bags,
@@ -379,8 +464,11 @@ function renderPlan(plan) {
             const isMuleItem = muleBag && m.to === muleBag;
             const rowClass = isMuleItem ? 'mule-row' : '';
             const toNameDisplay = isMuleItem ? m.to_name + ' 📦' : m.to_name;
+            const nameCell = el('td', {},
+                el('span', { class: 'item-name-cell' }, makeIcon(m), el('span', {}, m.name)));
+            attachTip(nameCell, m);
             body.appendChild(el('tr', { class: rowClass },
-                el('td', {}, m.name),
+                nameCell,
                 el('td', { class: 'item-qty' }, '×' + m.count),
                 el('td', {}, m.from_name),
                 el('td', { class: 'move-arrow' }, '→'),

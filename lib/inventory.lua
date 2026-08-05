@@ -52,18 +52,88 @@ local function derive_category(item_res)
     return category or 'General'
 end
 
+-- Windower resources expose job/slot/race bitfields via helper tables that
+-- carry a :name()/string form. We defensively stringify whatever we get so a
+-- resources build that stores plain strings, tables, or bitfields all work.
+local function stringify_set(value)
+    if value == nil then return nil end
+    if type(value) == 'string' then return value end
+    if type(value) == 'table' then
+        -- Try a few common shapes: array of strings, or map with a tostring.
+        local parts = {}
+        for _, v in ipairs(value) do
+            parts[#parts + 1] = tostring(v)
+        end
+        if #parts > 0 then return table.concat(parts, ' ') end
+        -- Fall back to tostring of the table (some res use metatables).
+        local ok, s = pcall(tostring, value)
+        if ok and s and not s:find('^table:') then return s end
+        return nil
+    end
+    return tostring(value)
+end
+
+-- Human-readable equippable slot names from the resources slot bitfield.
+local SLOT_NAMES = {
+    [0] = 'Main', [1] = 'Sub', [2] = 'Range', [3] = 'Ammo',
+    [4] = 'Head', [5] = 'Body', [6] = 'Hands', [7] = 'Legs',
+    [8] = 'Feet', [9] = 'Neck', [10] = 'Waist', [11] = 'L.Ear',
+    [12] = 'R.Ear', [13] = 'L.Ring', [14] = 'R.Ring', [15] = 'Back',
+}
+local function slots_from_bitfield(slots)
+    if type(slots) ~= 'number' or slots == 0 then return nil end
+    local names = {}
+    for bit = 0, 15 do
+        if bit32 and bit32.band(slots, bit32.lshift(1, bit)) ~= 0 then
+            names[#names + 1] = SLOT_NAMES[bit]
+        elseif not bit32 and math.floor(slots / (2 ^ bit)) % 2 == 1 then
+            names[#names + 1] = SLOT_NAMES[bit]
+        end
+    end
+    if #names == 0 then return nil end
+    return table.concat(names, ', ')
+end
+
 --- Return details for a single item resource id.
--- Returns a table { id, name, category, stack } or a placeholder for unknowns.
+-- Returns a table with id, name, category, stack plus rich metadata
+-- (description, jobs, level, slots) sourced from the local Windower
+-- `resources` library. No network calls are made here.
 function inventory.item_info(item_id)
     local r = res.items[item_id]
     if not r then
-        return { id = item_id, name = 'Unknown (' .. tostring(item_id) .. ')', category = 'Unknown', stack = 1 }
+        return {
+            id = item_id,
+            name = 'Unknown (' .. tostring(item_id) .. ')',
+            category = 'Unknown',
+            stack = 1,
+            description = nil,
+        }
     end
+
+    -- Description: Windower resources expose this as `description` on modern
+    -- builds. Some builds nest the English text; guard every access.
+    local description = r.description
+    if type(description) == 'table' then
+        description = description.en or description.english or description[1]
+    end
+    if type(description) ~= 'string' then description = nil end
+    if description then
+        -- DAT descriptions use \n line breaks; normalize to spaces for tooltips.
+        description = description:gsub('\r', ''):gsub('\n', ' '):gsub('%s+', ' ')
+    end
+
     return {
         id = item_id,
         name = r.english or r.name or ('Item ' .. tostring(item_id)),
         category = derive_category(r),
         stack = r.stack or 1,
+        description = description,
+        item_level = r.item_level,
+        level = r.level,
+        jobs = stringify_set(r.jobs),
+        races = stringify_set(r.races),
+        slots = slots_from_bitfield(r.slots),
+        skill = r.skill,
     }
 end
 
@@ -109,6 +179,11 @@ function inventory.read_bag(bag_id)
                 name = info.name,
                 category = info.category,
                 stack = info.stack,
+                description = info.description,
+                item_level = info.item_level,
+                level = info.level,
+                jobs = info.jobs,
+                slots = info.slots,
             }
             result.used = result.used + 1
         end
