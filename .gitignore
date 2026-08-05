@@ -1,0 +1,21 @@
+# AutoSort — Windower 4 Lua add-on
+
+# User-specific saved settings (bags + rules). Do not commit personal config.
+data/settings.json
+
+# Windower / Lua runtime artifacts
+*.log
+*.bak
+*.tmp
+*.swp
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.sublime-*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Compiled Lua (if any tooling produces it)
+*.luac

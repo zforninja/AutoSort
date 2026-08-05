@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoSort — FFXI Inventory Sorter</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="brand">
+            <span class="brand-mark">A</span>
+            <div>
+                <h1>AutoSort</h1>
+                <p class="tagline">FFXI inventory sorting for Windower&nbsp;4</p>
+            </div>
+        </div>
+        <div class="header-actions">
+            <span id="conn-status" class="pill pill-offline">Connecting…</span>
+            <button id="global-refresh" class="btn btn-ghost" title="Refresh all data">↻ Refresh</button>
+        </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="status" role="tab">Inventory Status</button>
+        <button class="tab" data-tab="settings" role="tab">Bag Settings</button>
+        <button class="tab" data-tab="rules" role="tab">Sort Rules</button>
+        <button class="tab" data-tab="preview" role="tab">Preview &amp; Execute</button>
+    </nav>
+
+    <main>
+        <!-- ================= TAB 1: INVENTORY STATUS ================= -->
+        <section id="tab-status" class="tab-panel active">
+            <div class="panel-head">
+                <h2>Inventory Status</h2>
+                <button id="status-refresh" class="btn btn-ghost">↻ Refresh</button>
+            </div>
+            <p class="hint">Live contents of every <strong>enabled</strong> bag. Enable more bags in the Bag Settings tab.</p>
+            <div id="status-list" class="bag-list">
+                <div class="empty">Loading…</div>
+            </div>
+        </section>
+
+        <!-- ================= TAB 2: BAG SETTINGS ================= -->
+        <section id="tab-settings" class="tab-panel">
+            <div class="panel-head">
+                <h2>Bag Settings</h2>
+                <button id="settings-save" class="btn btn-primary">Save Bag Settings</button>
+            </div>
+            <p class="hint">
+                Toggle the storage containers you actually own. Disabled bags are ignored by
+                sorting and hidden from Inventory Status. Inventory is always on — it is the
+                required intermediate for every move.
+            </p>
+            <div class="field-inline">
+                <label for="move-delay">Delay between moves (seconds)</label>
+                <input type="number" id="move-delay" min="0.3" max="5" step="0.1" value="0.7">
+                <span class="hint-sm">Higher is safer against server rejections.</span>
+            </div>
+            <div id="bag-toggles" class="toggle-grid">
+                <div class="empty">Loading…</div>
+            </div>
+        </section>
+
+        <!-- ================= TAB 3: SORT RULES ================= -->
+        <section id="tab-rules" class="tab-panel">
+            <div class="panel-head">
+                <h2>Sort Rules</h2>
+                <button id="rules-save" class="btn btn-primary">Save Rules</button>
+            </div>
+            <p class="hint">
+                Rules are checked <strong>top to bottom — first match wins</strong>. Match by item
+                <em>name</em> (supports <code>*</code> wildcards, e.g. <code>*Sword*</code>) or by
+                <em>category</em>. Items with no matching rule are left where they are.
+            </p>
+
+            <div class="rule-add card">
+                <div class="rule-add-row">
+                    <select id="new-rule-type">
+                        <option value="name">Name</option>
+                        <option value="category">Category</option>
+                    </select>
+                    <input type="text" id="new-rule-pattern" placeholder="e.g. *Sword*  or  Excalibur">
+                    <select id="new-rule-category" class="hidden"></select>
+                    <span class="arrow">→</span>
+                    <select id="new-rule-target"></select>
+                    <button id="add-rule" class="btn btn-primary">Add Rule</button>
+                </div>
+            </div>
+
+            <table class="rules-table">
+                <thead>
+                    <tr>
+                        <th style="width:40px">#</th>
+                        <th style="width:110px">Type</th>
+                        <th>Match</th>
+                        <th style="width:220px">Target Bag</th>
+                        <th style="width:110px"></th>
+                    </tr>
+                </thead>
+                <tbody id="rules-body">
+                    <tr><td colspan="5" class="empty">No rules yet. Add one above.</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ================= TAB 4: PREVIEW & EXECUTE ================= -->
+        <section id="tab-preview" class="tab-panel">
+            <div class="panel-head">
+                <h2>Preview &amp; Execute</h2>
+                <div>
+                    <button id="generate-preview" class="btn btn-primary">Generate Preview</button>
+                    <button id="execute-sort" class="btn btn-danger" disabled>Execute Sort</button>
+                    <button id="stop-sort" class="btn btn-ghost hidden">Stop</button>
+                </div>
+            </div>
+
+            <div id="preview-warnings" class="warnings hidden"></div>
+
+            <h3 class="section-label">Planned Moves <span id="move-count" class="count">0</span></h3>
+            <table class="moves-table">
+                <thead>
+                    <tr>
+                        <th>Item</th>
+                        <th style="width:60px">Qty</th>
+                        <th style="width:180px">From</th>
+                        <th style="width:40px"></th>
+                        <th style="width:180px">To</th>
+                        <th style="width:70px">Hops</th>
+                    </tr>
+                </thead>
+                <tbody id="moves-body">
+                    <tr><td colspan="6" class="empty">Generate a preview to see planned moves.</td></tr>
+                </tbody>
+            </table>
+
+            <h3 class="section-label">Capacity Impact</h3>
+            <div id="capacity-list" class="capacity-list">
+                <div class="empty">No preview generated yet.</div>
+            </div>
+
+            <h3 class="section-label">Unmatched Items <span id="unmatched-count" class="count">0</span></h3>
+            <div id="unmatched-list" class="unmatched-list">
+                <div class="empty">—</div>
+            </div>
+
+            <div id="exec-progress" class="exec-progress hidden">
+                <h3 class="section-label">Execution Progress</h3>
+                <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+                <div id="progress-text" class="progress-text">0 / 0</div>
+                <pre id="progress-log" class="progress-log"></pre>
+            </div>
+        </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
