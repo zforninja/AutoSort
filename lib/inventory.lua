@@ -29,6 +29,8 @@ local function derive_category(item_res)
         return 'Weapon'
     elseif category == 'Armor' then
         return 'Armor'
+    elseif category == 'Ammunition' then
+        return 'Ammo'
     elseif category == 'Usable' then
         -- Food, potions, scrolls, etc.
         if item_res.type == 4 or (item_res.name and item_res.name:lower():find('food')) then
