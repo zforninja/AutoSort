@@ -48,6 +48,7 @@ function config.defaults()
         move_delay = 0.7,
         enabled_bags = enabled,
         rules = {},
+        mule_bag = nil,  -- Optional: designate one bag as your "mule outbox"
     }
 end
 
@@ -87,6 +88,14 @@ local function sanitize(settings)
         end
     end
     settings.rules = clean_rules
+
+    -- mule_bag: must be a valid bag key or nil
+    if settings.mule_bag ~= nil then
+        local valid_bag = bags.get_by_key(tostring(settings.mule_bag))
+        settings.mule_bag = valid_bag and tostring(settings.mule_bag) or nil
+    else
+        settings.mule_bag = nil
+    end
 
     return settings
 end

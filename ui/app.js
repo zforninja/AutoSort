@@ -171,6 +171,7 @@ function renderBagToggles() {
         input.addEventListener('change', () => {
             state.settings.enabled_bags[b.key] = input.checked;
             card.classList.toggle('disabled', !input.checked);
+            populateMuleBagDropdown(); // update mule bag options when bags change
         });
 
         const card = el('div', { class: 'toggle-card' + (enabled ? '' : ' disabled') },
@@ -185,13 +186,38 @@ function renderBagToggles() {
     });
 }
 
+function populateMuleBagDropdown() {
+    const select = $('#mule-bag');
+    const currentValue = select.value;
+    select.innerHTML = '<option value="">None — no mule designation</option>';
+    
+    const catalog = (state.status && state.status.catalog) || state.catalog;
+    catalog.forEach(b => {
+        if (state.settings.enabled_bags[b.key]) {
+            const opt = el('option', { value: b.key }, b.name);
+            select.appendChild(opt);
+        }
+    });
+    
+    // Restore the previous selection if it's still valid
+    if (state.settings.mule_bag && state.settings.enabled_bags[state.settings.mule_bag]) {
+        select.value = state.settings.mule_bag;
+    } else if (currentValue && state.settings.enabled_bags[currentValue]) {
+        select.value = currentValue;
+    } else {
+        select.value = '';
+    }
+}
+
 async function saveBagSettings() {
     state.settings.move_delay = parseFloat($('#move-delay').value) || 0.7;
+    state.settings.mule_bag = $('#mule-bag').value || null;
     try {
         const res = await api('settings', 'POST', {
             enabled_bags: state.settings.enabled_bags,
             rules: state.settings.rules,
             move_delay: state.settings.move_delay,
+            mule_bag: state.settings.mule_bag,
         });
         if (res.ok) {
             state.settings = res.settings;
@@ -348,13 +374,17 @@ function renderPlan(plan) {
     if (!plan.moves.length) {
         body.appendChild(el('tr', {}, el('td', { colspan: '6', class: 'empty' }, 'No moves — everything is already sorted or unmatched.')));
     } else {
+        const muleBag = state.settings.mule_bag;
         plan.moves.forEach(m => {
-            body.appendChild(el('tr', {},
+            const isMuleItem = muleBag && m.to === muleBag;
+            const rowClass = isMuleItem ? 'mule-row' : '';
+            const toNameDisplay = isMuleItem ? m.to_name + ' 📦' : m.to_name;
+            body.appendChild(el('tr', { class: rowClass },
                 el('td', {}, m.name),
                 el('td', { class: 'item-qty' }, '×' + m.count),
                 el('td', {}, m.from_name),
                 el('td', { class: 'move-arrow' }, '→'),
-                el('td', {}, m.to_name),
+                el('td', {}, toNameDisplay),
                 el('td', {}, el('span', { class: 'hop-badge hop-' + m.hops }, m.hops + (m.hops === 1 ? ' hop' : ' hops'))),
             ));
         });
@@ -456,6 +486,7 @@ async function loadSettings() {
         state.categories = res.categories || [];
         $('#move-delay').value = state.settings.move_delay ?? 0.7;
         populateTargetDropdowns();
+        populateMuleBagDropdown();
         renderBagToggles();
         renderRules();
     } catch (e) {

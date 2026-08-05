@@ -62,12 +62,26 @@ Short alias: `//asort` works everywhere `//autosort` does.
 ## Usage
 
 1. **Bag Settings tab** — enable the storage containers you actually own. Inventory is always on because it is the required intermediate for every move.
+   - **Mule Bag (optional)** — designate one bag as your "mule outbox" for items destined for secondary characters. Items routed to this bag will be highlighted with **📦 For Mule** in the preview, making it easy to transfer them to alts via the delivery box.
 2. **Sort Rules tab** — add rules. For each rule choose:
    - **Type**: `Name` (matches the item name, supports `*` wildcards) or `Category` (matches a broad item type).
    - **Match**: the pattern or category.
    - **Target Bag**: where matching items should go.
    Use the ↑ / ↓ buttons to order rules — the **first** matching rule wins. Click **Save Rules**.
 3. **Preview & Execute tab** — click **Generate Preview** to see all planned moves, capacity impact, and unmatched items. When you're happy, click **Execute Sort** and watch the progress log.
+
+---
+
+## Mule Bag (transferring items to alts)
+
+AutoSort can gather items destined for secondary characters into a designated "mule bag" to make manual transfers safer and easier:
+
+1. In **Bag Settings**, choose a **Mule Bag** from the dropdown (e.g. Mog Sack).
+2. Create sorting rules that route items to that bag (e.g. `Category: Weapon → Mog Sack`).
+3. Generate a preview — items going to your mule bag will be highlighted with **📦 For Mule** and shown with a green tint.
+4. After execution, all items for your alt are collected in one place. Walk to any moogle and manually send them via the delivery box.
+
+**Why manual?** Direct automation via packet injection is risky and ban-sensitive. This staging approach gives you 90% of the convenience with zero risk.
 
 ---
 

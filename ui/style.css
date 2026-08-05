@@ -202,6 +202,8 @@ table { width: 100%; border-collapse: collapse; }
 }
 .rules-table td, .moves-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .rules-table tr:hover td, .moves-table tr:hover td { background: var(--panel); }
+.mule-row { background: rgba(110,231,183,.08); }
+.mule-row:hover td { background: rgba(110,231,183,.12) !important; }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
 .tag-name { background: rgba(79,157,255,.18); color: var(--accent); }
 .tag-cat  { background: rgba(110,231,183,.15); color: var(--accent-2); }
