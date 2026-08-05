@@ -29,6 +29,8 @@ local function derive_category(item_res)
         return 'Weapon'
     elseif category == 'Armor' then
         return 'Armor'
+    elseif category == 'Ranged Weapon' then
+        return 'Ranged'
     elseif category == 'Ammunition' then
         return 'Ammo'
     elseif category == 'Usable' then

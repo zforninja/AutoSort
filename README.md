@@ -87,7 +87,7 @@ Short alias: `//asort` works everywhere `//autosort` does.
 - `Fire *` → matches "Fire Crystal", "Fire Cluster".
 - `Excalibur` (no `*`) → exact match only.
 
-**Categories** available: `Weapon`, `Armor`, `Ammo`, `Food`, `Usable`, `Crystal`, `Currency`, `General`.
+**Categories** available: `Weapon`, `Armor`, `Ranged`, `Ammo`, `Food`, `Usable`, `Crystal`, `Currency`, `General`.
 
 ---
 
