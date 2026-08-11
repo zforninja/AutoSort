@@ -25,7 +25,9 @@
 ]]
 
 local socket = require('socket')
-local json = require('json')
+-- Windower's bundled `json` library only DECODES (json.parse) and provides no
+-- json.encode/json.decode, so we use our own self-contained encoder/decoder.
+local json = require('lib/jsonutil')
 
 local server = {}
 

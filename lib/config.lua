@@ -27,7 +27,9 @@
     explicitly opts in to the containers they actually own.
 ]]
 
-local json = require('json')
+-- Windower's bundled `json` library only DECODES and provides no
+-- json.encode/json.decode, so we use our own self-contained encoder/decoder.
+local json = require('lib/jsonutil')
 local bags = require('lib/bags')
 
 local config = {}
