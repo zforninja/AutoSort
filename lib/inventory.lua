@@ -214,6 +214,64 @@ function inventory.snapshot(enabled_bags)
     return out
 end
 
+--- Probe a single bag's live accessibility via the Windower API.
+-- Returns { available = bool, enabled = bool, count = N, max = M }.
+--
+-- Detection strategy:
+--   * windower.ffxi.get_bag_info(id) reports { count, enabled, max }. The
+--     `enabled` flag is the game's own "is this container accessible right
+--     now" signal (e.g. Safe/Locker are only enabled inside the Mog House).
+--   * That flag is known to false-negative on higher wardrobes on some
+--     clients (it derives from an old packet). So we ALSO treat a bag as
+--     available whenever it currently holds items (count > 0) — you can't
+--     have items in a container you don't have access to.
+--   * Inventory (id 0) is always available.
+function inventory.detect_bag(bag_id)
+    local result = { available = false, enabled = false, count = 0, max = 0 }
+
+    if bag_id == bags.INVENTORY_ID then
+        result.available = true
+        result.enabled = true
+    end
+
+    if windower and windower.ffxi and windower.ffxi.get_bag_info then
+        local ok, info = pcall(windower.ffxi.get_bag_info, bag_id)
+        if ok and type(info) == 'table' then
+            result.enabled = info.enabled and true or false
+            result.count = tonumber(info.count) or 0
+            result.max = tonumber(info.max) or 0
+            if result.enabled or result.count > 0 then
+                result.available = true
+            end
+        end
+    end
+
+    -- Fallback: if get_bag_info is unavailable, infer from readable items.
+    if not result.available and bag_id ~= bags.INVENTORY_ID then
+        local ok, raw = pcall(windower.ffxi.get_items, bag_id)
+        if ok and type(raw) == 'table' then
+            if raw.enabled == true then
+                result.available = true
+                result.enabled = true
+            elseif type(raw.count) == 'number' and raw.count > 0 then
+                result.available = true
+            end
+        end
+    end
+
+    return result
+end
+
+--- Detect accessibility for every known bag.
+-- Returns a table keyed by bag key -> { available, enabled, count, max }.
+function inventory.detect_available()
+    local out = {}
+    for _, b in ipairs(bags.list) do
+        out[b.key] = inventory.detect_bag(b.id)
+    end
+    return out
+end
+
 --- Find the first free slot in a bag, or nil if full.
 function inventory.first_free_slot(bag_id)
     local raw = windower.ffxi.get_items(bag_id)

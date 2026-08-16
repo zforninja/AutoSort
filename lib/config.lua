@@ -57,6 +57,11 @@ function config.defaults()
         -- scraping is needed. Set to "" to disable icons entirely.
         icon_base_url = 'https://static.ffxiah.com/images/icon/',
         show_icons = true,       -- master toggle for item icons in the UI
+        -- Bags AutoSort has already auto-enabled once on detection. A bag is
+        -- added here the first time the game reports it accessible, so we
+        -- auto-enable it exactly once and never fight the user's later manual
+        -- toggle of that bag. Keyed by bag key -> true.
+        seen_bags = {},
     }
 end
 
@@ -111,6 +116,17 @@ local function sanitize(settings)
     end
     settings.show_icons = (settings.show_icons ~= false)
 
+    -- seen_bags: normalize to a map of valid bag key -> true.
+    local seen = {}
+    if type(settings.seen_bags) == 'table' then
+        for k, v in pairs(settings.seen_bags) do
+            if v and bags.get_by_key(tostring(k)) then
+                seen[tostring(k)] = true
+            end
+        end
+    end
+    settings.seen_bags = seen
+
     return settings
 end
 
@@ -160,6 +176,38 @@ function config.save(settings)
     fh:write(encoded)
     fh:close()
     return true
+end
+
+--- Apply live bag detection to a settings table (auto-enable once).
+--
+-- For every bag the game currently reports accessible that AutoSort has not
+-- auto-enabled before, turn it on and remember it in seen_bags. Bags already
+-- seen are left exactly as the user last set them, so this never overrides a
+-- manual toggle. Detection is a map: key -> { available = bool, ... }.
+--
+-- Returns (settings, newly_enabled) where newly_enabled is an ordered list of
+-- bag keys that were auto-enabled by this call (may be empty).
+function config.apply_detection(settings, detection)
+    settings.seen_bags = type(settings.seen_bags) == 'table' and settings.seen_bags or {}
+    settings.enabled_bags = type(settings.enabled_bags) == 'table' and settings.enabled_bags or {}
+    local newly_enabled = {}
+
+    if type(detection) ~= 'table' then
+        return settings, newly_enabled
+    end
+
+    -- Iterate in canonical bag order for deterministic notifications.
+    for _, b in ipairs(bags.list) do
+        local d = detection[b.key]
+        if d and d.available and not settings.seen_bags[b.key] then
+            settings.enabled_bags[b.key] = true
+            settings.seen_bags[b.key] = true
+            newly_enabled[#newly_enabled + 1] = b.key
+        end
+    end
+
+    settings.enabled_bags.inventory = true
+    return settings, newly_enabled
 end
 
 return config

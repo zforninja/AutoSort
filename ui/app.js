@@ -183,6 +183,9 @@ async function loadStatus() {
         setConn(true);
         state.status = data;
         renderStatus(data.bags || []);
+        // The status catalog carries live slot counts + availability badges,
+        // so re-render the Bag Settings toggles now that we have richer data.
+        if (data.catalog) renderBagToggles();
     } catch (e) {
         setConn(false);
         list.innerHTML = '<div class="empty">Could not reach the add-on. Is AutoSort loaded in-game?</div>';
@@ -257,10 +260,22 @@ function renderBagToggles() {
             populateMuleBagDropdown(); // update mule bag options when bags change
         });
 
+        // Detection badge: reflects what the game reports as accessible right now.
+        // Inventory is always accessible. `available` comes from /api/status.
+        const available = isInv || b.available === true;
+        const badge = el('span', {
+            class: 'detect-badge ' + (available ? 'detected' : 'unavailable'),
+            title: available
+                ? 'AutoSort can see this bag right now.'
+                : 'Not accessible right now (e.g. a Mog House bag while you are out in the field). You can still enable it — it just won\'t be sorted until you have access.',
+        }, available ? '✓ Detected' : 'Not accessible');
+
+        const name = el('div', { class: 'name' }, b.name, badge);
+
         const card = el('div', { class: 'toggle-card' + (enabled ? '' : ' disabled') },
             el('label', { class: 'switch' }, input, el('span', { class: 'slider' })),
             el('div', { class: 'toggle-info' },
-                el('div', { class: 'name' }, b.name),
+                name,
                 el('div', { class: 'slots' }, `Slots: ${b.used ?? 0} / ${b.max ?? 80}`),
                 el('div', { class: 'note' }, b.note || ''),
             ),
@@ -313,6 +328,33 @@ async function saveBagSettings() {
         }
     } catch (e) {
         toast('Save failed — add-on unreachable.', 'err');
+    }
+}
+
+// Ask the game which bags are accessible right now. The backend auto-enables
+// any newly-seen bags (leaving your manual choices untouched) and returns the
+// refreshed settings. We then re-render toggles + status so the badges update.
+async function detectBags() {
+    const btn = $('#settings-detect');
+    if (btn) { btn.disabled = true; btn.textContent = '🔍 Detecting…'; }
+    try {
+        const res = await api('detect', 'POST', {});
+        if (res.ok) {
+            if (res.settings) state.settings = res.settings;
+            const n = (res.newly && res.newly.length) || 0;
+            toast(n > 0
+                ? `Detected & enabled ${n} new bag(s).`
+                : 'Scan complete — no new bags found.', 'ok');
+            await loadStatus();      // refreshes catalog + availability badges
+            renderBagToggles();
+            populateMuleBagDropdown();
+        } else {
+            toast('Detection failed: ' + (res.error || 'unknown'), 'err');
+        }
+    } catch (e) {
+        toast('Detection failed — add-on unreachable.', 'err');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🔍 Auto-detect bags'; }
     }
 }
 
@@ -587,6 +629,7 @@ function initButtons() {
     $('#status-refresh').addEventListener('click', loadStatus);
     $('#global-refresh').addEventListener('click', () => { loadSettings(); loadStatus(); });
     $('#settings-save').addEventListener('click', saveBagSettings);
+    $('#settings-detect').addEventListener('click', detectBags);
     $('#rules-save').addEventListener('click', saveRules);
     $('#add-rule') && null; // wired in initRuleForm
     $('#generate-preview').addEventListener('click', generatePreview);

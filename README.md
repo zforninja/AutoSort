@@ -12,6 +12,7 @@ AutoSort moves items across every FFXI storage container using rules you define,
 - **Inventory Status** — live view of every enabled bag, slot usage, and contents.
 - **Item icons & tooltips** — every item row (in Status *and* the move preview) shows its real FFXI icon, and hovering reveals a rich tooltip (category, slot, level, usable jobs, description/stats, item ID) so you can make informed sorting decisions at a glance.
 - **Bag Settings** — toggle exactly which of the 16 storage containers you own (Wardrobe 3–8, Locker, Satchel, Sack, etc.).
+- **Automatic bag detection** — AutoSort asks the game which containers you can actually access (via `windower.ffxi.get_bag_info`) and **auto-enables new bags for you the first time it sees them** — so you never accidentally leave a real bag out. Each bag shows a live **✓ Detected** / **Not accessible** badge, and a **🔍 Auto-detect bags** button (or `//autosort detect`) re-scans on demand. Crucially, once a bag has been seen its on/off state is *yours* — auto-detect will never flip a toggle you set manually.
 - **Sort Rules** — map item **names** (with `*` wildcards) or **categories** to a target bag. Rules are evaluated top‑to‑bottom, first match wins. **No default rules — you define everything.**
 - **Preview & Execute** — see every planned move, per‑bag capacity impact (before → after, with over‑capacity warnings), and a list of unmatched items *before* anything moves.
 - **Safe execution** — moves run one at a time with a configurable delay to avoid server rejections. Full bags and inaccessible containers are skipped with a warning.
@@ -53,6 +54,7 @@ To load automatically at launch, add `lua load AutoSort` to your `scripts/init.t
 | `//autosort start` | (Re)start the HTTP server. |
 | `//autosort stop` | Stop the HTTP server. |
 | `//autosort reload` | Reload settings from `data/settings.json`. |
+| `//autosort detect` | Re-scan accessible bags and auto-enable any newly-seen ones. |
 | `//autosort port <n>` | Change the server port (then `//autosort start`). |
 | `//autosort sort` | Preview and immediately execute a sort from chat. |
 
@@ -150,9 +152,10 @@ AutoSort/
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/status` | All items in enabled bags + full bag catalog |
+| GET | `/api/status` | All items in enabled bags + full bag catalog (with live `available` flags) |
 | GET | `/api/settings` | Current settings, bag catalog, categories |
 | POST | `/api/settings` | Save enabled bags + rules |
+| POST | `/api/detect` | Detect accessible bags & auto-enable newly-seen ones (respects manual toggles) |
 | POST | `/api/preview` | Build a move plan from current rules |
 | POST | `/api/execute` | Begin executing the last previewed plan |
 | GET | `/api/progress` | Live execution progress + log |

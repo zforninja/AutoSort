@@ -160,6 +160,54 @@ def enrich_item(item):
         out.setdefault(k, v)
     return out
 
+# Full bag catalog (mirrors lib/bags.lua) so the UI can render every container,
+# not just the handful that hold demo items.
+BAG_CATALOG = [
+    {"key": "inventory", "id": 0,  "name": "Inventory",     "note": "Always on — the required intermediate for every move."},
+    {"key": "safe",      "id": 1,  "name": "Mog Safe",      "note": "Mog House only."},
+    {"key": "storage",   "id": 2,  "name": "Storage",       "note": "Mog House only."},
+    {"key": "locker",    "id": 4,  "name": "Mog Locker",    "note": "Mog House only (rented)."},
+    {"key": "satchel",   "id": 5,  "name": "Mog Satchel",   "note": "Accessible anywhere."},
+    {"key": "sack",      "id": 6,  "name": "Mog Sack",      "note": "Accessible anywhere."},
+    {"key": "case",      "id": 7,  "name": "Mog Case",      "note": "Accessible anywhere."},
+    {"key": "wardrobe",  "id": 8,  "name": "Mog Wardrobe",  "note": "Equippable storage."},
+    {"key": "safe2",     "id": 9,  "name": "Mog Safe 2",    "note": "Mog House only."},
+    {"key": "wardrobe2", "id": 10, "name": "Mog Wardrobe 2","note": "Equippable storage."},
+    {"key": "wardrobe3", "id": 11, "name": "Mog Wardrobe 3","note": "Equippable storage."},
+    {"key": "wardrobe4", "id": 12, "name": "Mog Wardrobe 4","note": "Equippable storage."},
+    {"key": "wardrobe5", "id": 13, "name": "Mog Wardrobe 5","note": "Equippable storage."},
+    {"key": "wardrobe6", "id": 14, "name": "Mog Wardrobe 6","note": "Equippable storage."},
+    {"key": "wardrobe7", "id": 15, "name": "Mog Wardrobe 7","note": "Equippable storage."},
+    {"key": "wardrobe8", "id": 16, "name": "Mog Wardrobe 8","note": "Equippable storage."},
+]
+
+# Simulates "what the game reports as accessible right now". We pretend the
+# player is out in the field, so Mog-House-only bags read as NOT accessible.
+MOCK_AVAILABLE = {
+    "inventory", "satchel", "sack", "case",
+    "wardrobe", "wardrobe2", "wardrobe3", "wardrobe4",
+}
+
+# Tracks which bags AutoSort has already auto-enabled (mirrors seen_bags).
+# Seed with only the bags currently ON, so accessible-but-off bags
+# (wardrobe3/wardrobe4 here) demonstrate auto-enable on the first detect.
+mock_seen_bags = {k for k, v in mock_settings["enabled_bags"].items() if v}
+
+
+def build_catalog_with_detection():
+    """Catalog entries enriched with live availability + used/max, like the add-on."""
+    out = []
+    for b in BAG_CATALOG:
+        inv = mock_inventory.get(b["key"])
+        used = len(inv["items"]) if inv else 0
+        out.append({
+            "id": b["id"], "key": b["key"], "name": b["name"], "note": b["note"],
+            "enabled": bool(mock_settings["enabled_bags"].get(b["key"], False)),
+            "available": b["key"] in MOCK_AVAILABLE,
+            "used": used, "max": 80,
+        })
+    return out
+
 # API Routes
 @app.route('/api/status')
 def api_status():
@@ -177,22 +225,40 @@ def api_status():
                 "enabled": data["enabled"],
                 "items": [enrich_item(it) for it in data["items"]]
             })
-    return jsonify({"bags": bags})
+    return jsonify({"bags": bags, "catalog": build_catalog_with_detection()})
+
+
+@app.route('/api/detect', methods=['POST'])
+def api_detect():
+    """Auto-enable any newly-accessible bag we haven't seen before.
+
+    Mirrors config.apply_detection: available + not-yet-seen => enable + mark
+    seen. Bags already seen keep whatever the user last set, so a manual toggle
+    is never overridden.
+    """
+    global mock_seen_bags
+    newly = []
+    for b in BAG_CATALOG:
+        key = b["key"]
+        if key in MOCK_AVAILABLE and key not in mock_seen_bags:
+            mock_settings["enabled_bags"][key] = True
+            mock_seen_bags.add(key)
+            newly.append(key)
+    mock_settings["enabled_bags"]["inventory"] = True
+    detection = {b["key"]: {"available": b["key"] in MOCK_AVAILABLE}
+                 for b in BAG_CATALOG}
+    return jsonify({"ok": True, "settings": mock_settings,
+                    "detection": detection, "newly": newly})
 
 @app.route('/api/settings', methods=['GET'])
 def api_get_settings():
     """Returns current settings"""
-    # Build catalog from mock inventory
-    catalog = []
-    for key, data in mock_inventory.items():
-        catalog.append({
-            "key": key,
-            "name": data["name"],
-            "id": data["id"],
-            "max": data["max"],
-            "note": data.get("note", "")
-        })
-    
+    # Full catalog so every container shows in the toggle list + dropdowns.
+    catalog = [
+        {"key": b["key"], "name": b["name"], "id": b["id"], "note": b["note"]}
+        for b in BAG_CATALOG
+    ]
+
     return jsonify({
         "settings": mock_settings,
         "catalog": catalog,

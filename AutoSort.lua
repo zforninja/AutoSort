@@ -12,6 +12,7 @@
         //autosort stop     Stop the HTTP server.
         //autosort start    (Re)start the HTTP server.
         //autosort url      Print the Web UI URL to chat.
+        //autosort detect   Re-scan accessible bags and auto-enable new ones.
 
     Author: zforninja
 ]]
@@ -52,6 +53,25 @@ local function ui_url()
     return ('http://127.0.0.1:%d/'):format(state.settings and state.settings.port or 9898)
 end
 
+-- Run live bag detection, auto-enable any newly-accessible bags exactly once,
+-- persist, and announce what changed. Returns the detection map so callers can
+-- hand it to the UI. Safe to call repeatedly.
+local function detect_and_apply(announce)
+    local detection = inventory.detect_available()
+    local _, newly = config.apply_detection(state.settings, detection)
+    config.save(state.settings)
+    state.settings = config.load()
+    if announce and #newly > 0 then
+        local names = {}
+        for _, key in ipairs(newly) do
+            local b = bags.get_by_key(key)
+            names[#names + 1] = b and b.name or key
+        end
+        notify(('Detected & enabled %d bag(s): %s'):format(#newly, table.concat(names, ', ')))
+    end
+    return detection, newly
+end
+
 -- ---------------------------------------------------------------------------
 -- API handlers (called from the HTTP server on the game thread)
 -- ---------------------------------------------------------------------------
@@ -61,6 +81,7 @@ local api = {}
 -- GET /api/status — inventory snapshot for enabled bags + full bag catalog.
 function api.status()
     local snapshot = inventory.snapshot(state.settings.enabled_bags)
+    local detection = inventory.detect_available()
     -- Catalog describes every bag (id/key/name/note) so the UI can render the
     -- Bag Settings tab and show live slot counts even for disabled bags.
     local catalog = {}
@@ -71,9 +92,11 @@ function api.status()
         if ok then
             used, max = data.used, data.max
         end
+        local d = detection[b.key] or {}
         catalog[#catalog + 1] = {
             id = b.id, key = b.key, name = b.name, note = b.note,
             enabled = state.settings.enabled_bags[b.key] and true or false,
+            available = d.available and true or false,
             used = used, max = max,
         }
     end
@@ -134,6 +157,12 @@ function api.save_settings(data)
     return { ok = false, error = tostring(err) }
 end
 
+-- POST /api/detect — run live bag detection and auto-enable newly-seen bags.
+function api.detect()
+    local detection, newly = detect_and_apply(false)
+    return { ok = true, settings = state.settings, detection = detection, newly = newly }
+end
+
 -- POST /api/preview — build and cache a move plan.
 function api.preview()
     local plan = sorter.build_plan(state.settings)
@@ -191,6 +220,9 @@ end
 windower.register_event('load', function()
     state.settings = config.load()
     notify(('AutoSort v%s loaded.'):format(_addon.version))
+    -- Auto-detect accessible bags and enable any we haven't seen before. This
+    -- runs once per load; bags you've manually toggled off stay off.
+    detect_and_apply(true)
     start_server()
 end)
 
@@ -245,12 +277,19 @@ windower.register_event('addon command', function(cmd, ...)
             warn('Usage: //autosort port <number>')
         end
 
+    elseif cmd == 'detect' then
+        -- Re-scan accessible bags and auto-enable any newly-seen ones.
+        local _, newly = detect_and_apply(true)
+        if #newly == 0 then
+            notify('No new bags detected. Everything accessible is already known.')
+        end
+
     elseif cmd == 'sort' then
         -- Convenience: preview + execute from chat.
         api.preview()
         api.execute()
 
     else
-        notify('Commands: open | url | start | stop | reload | port <n> | sort')
+        notify('Commands: open | url | start | stop | reload | detect | port <n> | sort')
     end
 end)

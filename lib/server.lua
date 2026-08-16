@@ -18,6 +18,7 @@
         api.status()          -> Lua table  (GET  /api/status)
         api.get_settings()    -> Lua table  (GET  /api/settings)
         api.save_settings(t)  -> Lua table  (POST /api/settings)
+        api.detect()          -> Lua table  (POST /api/detect)
         api.preview()         -> Lua table  (POST /api/preview)
         api.execute()         -> Lua table  (POST /api/execute)
         api.progress()        -> Lua table  (GET  /api/progress)
@@ -144,6 +145,8 @@ local function route(req)
                 return json_response({ ok = false, error = 'invalid JSON' }, '400 Bad Request')
             end
             return json_response(api.save_settings and api.save_settings(decoded) or { ok = true })
+        elseif req.method == 'POST' and endpoint == 'detect' then
+            return json_response(api.detect and api.detect() or {})
         elseif req.method == 'POST' and endpoint == 'preview' then
             return json_response(api.preview and api.preview() or {})
         elseif req.method == 'POST' and endpoint == 'execute' then

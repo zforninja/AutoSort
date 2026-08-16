@@ -45,11 +45,17 @@
         <section id="tab-settings" class="tab-panel">
             <div class="panel-head">
                 <h2>Bag Settings</h2>
-                <button id="settings-save" class="btn btn-primary">Save Bag Settings</button>
+                <div class="head-actions">
+                    <button id="settings-detect" class="btn btn-ghost" title="Ask the game which bags you can access right now and auto-enable any new ones">🔍 Auto-detect bags</button>
+                    <button id="settings-save" class="btn btn-primary">Save Bag Settings</button>
+                </div>
             </div>
             <p class="hint">
-                Toggle the storage containers you actually own. Disabled bags are ignored by
-                sorting and hidden from Inventory Status. Inventory is always on — it is the
+                Toggle the storage containers you actually own. AutoSort auto-detects which bags
+                you can access and enables new ones for you the first time it sees them — after that,
+                your manual on/off choice is always respected. A <span class="detect-badge detected">✓ Detected</span>
+                badge means the game can see that bag right now; <span class="detect-badge unavailable">Not accessible</span>
+                usually means a Mog House bag while you're out in the field. Inventory is always on — it is the
                 required intermediate for every move.
             </p>
             <div class="field-inline">
