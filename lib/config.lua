@@ -14,9 +14,9 @@
         },
         "rules": [                   -- evaluated top-to-bottom, first match wins
             {
-                "match_type": "name",     -- "name" | "category"
-                "pattern": "*Sword*",      -- name/wildcard OR category string
-                "target": "sack"           -- destination bag key
+                "category": "Main",      -- slot/item category, or "ALL" to match any
+                "wildcard": "*Sword*",   -- name pattern (* wildcard), or "" to match any
+                "target": "sack"         -- destination bag key
             },
             ...
         ]
@@ -91,12 +91,30 @@ local function sanitize(settings)
     local clean_rules = {}
     if type(settings.rules) == 'table' then
         for _, r in ipairs(settings.rules) do
-            if type(r) == 'table' and r.pattern and r.target then
-                clean_rules[#clean_rules + 1] = {
-                    match_type = (r.match_type == 'category') and 'category' or 'name',
-                    pattern = tostring(r.pattern),
-                    target = tostring(r.target),
-                }
+            if type(r) == 'table' and r.target then
+                if r.match_type then
+                    -- Migrate old schema {match_type, pattern, target} -> new schema.
+                    if r.match_type == 'category' then
+                        clean_rules[#clean_rules + 1] = {
+                            category = tostring(r.pattern or ''),
+                            wildcard = '',
+                            target   = tostring(r.target),
+                        }
+                    else -- 'name' or anything else
+                        clean_rules[#clean_rules + 1] = {
+                            category = 'ALL',
+                            wildcard = tostring(r.pattern or ''),
+                            target   = tostring(r.target),
+                        }
+                    end
+                elseif r.category ~= nil or r.wildcard ~= nil then
+                    -- New schema {category, wildcard, target}.
+                    clean_rules[#clean_rules + 1] = {
+                        category = tostring(r.category or 'ALL'),
+                        wildcard = tostring(r.wildcard or ''),
+                        target   = tostring(r.target),
+                    }
+                end
             end
         end
     end

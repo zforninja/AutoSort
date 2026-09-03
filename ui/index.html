@@ -82,22 +82,24 @@
                 <button id="rules-save" class="btn btn-primary">Save Rules</button>
             </div>
             <p class="hint">
-                Rules are checked <strong>top to bottom — first match wins</strong>. Pick an equipment/item
-                <em>category</em> and combine it with an optional name <em>wildcard</em> (e.g. <code>*Ring +1</code>).
+                Rules are checked <strong>top to bottom — first match wins</strong>. Pick a
+                <em>category</em> (slot type or item type) and optionally a <em>name filter</em>
+                (supports <code>*</code> wildcards, e.g. <code>*Sword*</code>). Both conditions
+                must pass. Leave the name filter blank to match all items in the category.
                 Items with no matching rule are left where they are.
             </p>
 
             <div class="rule-add card">
-                <div class="rule-add-row" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <div class="rule-add-row">
                     <select id="new-rule-category">
-                        <option value="ALL">-- Any Category --</option>
-                        <optgroup label="Weapons & Ranged">
-                            <option value="Main">Main Weapon</option>
+                        <option value="ALL">ALL (any item)</option>
+                        <optgroup label="Weapons">
+                            <option value="Main">Main Hand</option>
                             <option value="Sub">Sub / Shield</option>
                             <option value="Ranged">Ranged</option>
-                            <option value="Ammo">Ammo / Throwing</option>
+                            <option value="Ammo">Ammo</option>
                         </optgroup>
-                        <optgroup label="Armor & Accessories">
+                        <optgroup label="Armor">
                             <option value="Head">Head</option>
                             <option value="Body">Body</option>
                             <option value="Hands">Hands</option>
@@ -111,15 +113,13 @@
                         </optgroup>
                         <optgroup label="Non-Equipment">
                             <option value="Food">Food</option>
-                            <option value="Usable">Usable / Meds</option>
-                            <option value="Crystal">Crystals</option>
+                            <option value="Usable">Usable</option>
+                            <option value="Crystal">Crystal</option>
                             <option value="Currency">Currency</option>
-                            <option value="General">General / Materials</option>
+                            <option value="General">General</option>
                         </optgroup>
                     </select>
-                    
-                    <input type="text" id="new-rule-wildcard" placeholder="Optional Wildcard (e.g. *Warp*)">
-                    
+                    <input type="text" id="new-rule-wildcard" placeholder="Name filter, e.g. *Sword* (blank = match all)">
                     <span class="arrow">→</span>
                     <select id="new-rule-target"></select>
                     <button id="add-rule" class="btn btn-primary">Add Rule</button>
@@ -130,9 +130,9 @@
                 <thead>
                     <tr>
                         <th style="width:40px">#</th>
-                        <th style="width:140px">Category</th>
-                        <th>Wildcard Match</th>
-                        <th style="width:200px">Target Bag</th>
+                        <th style="width:130px">Category</th>
+                        <th>Wildcard</th>
+                        <th style="width:220px">Target Bag</th>
                         <th style="width:110px"></th>
                     </tr>
                 </thead>

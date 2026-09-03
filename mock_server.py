@@ -6,6 +6,7 @@ Serves the static UI and provides mock API responses
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+import fnmatch
 import os
 
 app = Flask(__name__)
@@ -37,15 +38,20 @@ mock_settings = {
         "safe2": False
     },
     "rules": [
-        {"match_type": "name", "pattern": "*Sword*", "target": "wardrobe"},
-        {"match_type": "name", "pattern": "*Shield*", "target": "wardrobe"},
-        {"match_type": "category", "pattern": "Armor", "target": "wardrobe2"},
-        {"match_type": "name", "pattern": "*Potion*", "target": "sack"},
-        {"match_type": "category", "pattern": "Food", "target": "sack"}
+        {"category": "Main",   "wildcard": "",         "target": "wardrobe"},
+        {"category": "Sub",    "wildcard": "",         "target": "wardrobe"},
+        {"category": "Ranged", "wildcard": "",         "target": "wardrobe"},
+        {"category": "Body",   "wildcard": "",         "target": "wardrobe2"},
+        {"category": "Head",   "wildcard": "",         "target": "wardrobe2"},
+        {"category": "Usable", "wildcard": "*Potion*", "target": "sack"},
+        {"category": "Food",   "wildcard": "",         "target": "sack"},
     ]
 }
 
-# Mock inventory data
+# Mock inventory data — categories use the new slot-based system:
+#   equippable items: Main / Sub / Ranged / Ammo / Head / Body / Hands / Legs /
+#                     Feet / Neck / Waist / Earring / Ring / Back
+#   non-equippable:   Food / Usable / Crystal / Currency / General
 mock_inventory = {
     "inventory": {
         "name": "Inventory",
@@ -53,15 +59,15 @@ mock_inventory = {
         "max": 80,
         "enabled": True,
         "items": [
-            {"slot": 0, "id": 16769, "name": "Bronze Sword", "count": 1, "category": "Weapon"},
-            {"slot": 1, "id": 4509, "name": "Hi-Potion", "count": 12, "category": "Usable"},
-            {"slot": 2, "id": 4422, "name": "Meat Mithkabob", "count": 6, "category": "Food"},
-            {"slot": 3, "id": 12416, "name": "Bronze Harness", "count": 1, "category": "Armor"},
-            {"slot": 4, "id": 16897, "name": "Mythril Sword", "count": 1, "category": "Weapon"},
-            {"slot": 5, "id": 17123, "name": "Kite Shield", "count": 1, "category": "Armor"},
-            {"slot": 8, "id": 4509, "name": "Hi-Potion", "count": 8, "category": "Usable"},
-            {"slot": 10, "id": 646, "name": "Fire Crystal", "count": 12, "category": "Crystal"},
-            {"slot": 12, "id": 4545, "name": "Beastman Seal", "count": 5, "category": "Currency"}
+            {"slot": 0,  "id": 16769, "name": "Bronze Sword",   "count": 1,  "category": "Main"},
+            {"slot": 1,  "id": 4509,  "name": "Hi-Potion",      "count": 12, "category": "Usable"},
+            {"slot": 2,  "id": 4422,  "name": "Meat Mithkabob", "count": 6,  "category": "Food"},
+            {"slot": 3,  "id": 12416, "name": "Bronze Harness", "count": 1,  "category": "Body"},
+            {"slot": 4,  "id": 16897, "name": "Mythril Sword",  "count": 1,  "category": "Main"},
+            {"slot": 5,  "id": 17123, "name": "Kite Shield",    "count": 1,  "category": "Sub"},
+            {"slot": 8,  "id": 4509,  "name": "Hi-Potion",      "count": 8,  "category": "Usable"},
+            {"slot": 10, "id": 646,   "name": "Fire Crystal",   "count": 12, "category": "Crystal"},
+            {"slot": 12, "id": 4545,  "name": "Beastman Seal",  "count": 5,  "category": "Currency"},
         ]
     },
     "safe": {
@@ -70,12 +76,12 @@ mock_inventory = {
         "max": 80,
         "enabled": True,
         "items": [
-            {"slot": 0, "id": 16641, "name": "Long Sword", "count": 1, "category": "Weapon"},
-            {"slot": 1, "id": 12417, "name": "Chainmail", "count": 1, "category": "Armor"},
-            {"slot": 2, "id": 16769, "name": "Bronze Sword", "count": 1, "category": "Weapon"},
-            {"slot": 3, "id": 17152, "name": "Longbow", "count": 1, "category": "Ranged"},
-            {"slot": 4, "id": 18700, "name": "Arquebus", "count": 1, "category": "Ranged"},
-            {"slot": 5, "id": 4509, "name": "Hi-Potion", "count": 20, "category": "Usable"}
+            {"slot": 0, "id": 16641, "name": "Long Sword",  "count": 1,  "category": "Main"},
+            {"slot": 1, "id": 12417, "name": "Chainmail",   "count": 1,  "category": "Body"},
+            {"slot": 2, "id": 16769, "name": "Bronze Sword","count": 1,  "category": "Main"},
+            {"slot": 3, "id": 17152, "name": "Longbow",     "count": 1,  "category": "Ranged"},
+            {"slot": 4, "id": 18700, "name": "Arquebus",    "count": 1,  "category": "Ranged"},
+            {"slot": 5, "id": 4509,  "name": "Hi-Potion",  "count": 20, "category": "Usable"},
         ]
     },
     "sack": {
@@ -85,7 +91,7 @@ mock_inventory = {
         "enabled": True,
         "items": [
             {"slot": 0, "id": 4422, "name": "Meat Mithkabob", "count": 12, "category": "Food"},
-            {"slot": 2, "id": 4468, "name": "Ether", "count": 6, "category": "Usable"}
+            {"slot": 2, "id": 4468, "name": "Ether",           "count": 6,  "category": "Usable"},
         ]
     },
     "case": {
@@ -95,7 +101,7 @@ mock_inventory = {
         "enabled": True,
         "items": [
             {"slot": 0, "id": 1449, "name": "Copper Ore", "count": 12, "category": "General"},
-            {"slot": 1, "id": 1450, "name": "Tin Ore", "count": 8, "category": "General"}
+            {"slot": 1, "id": 1450, "name": "Tin Ore",    "count": 8,  "category": "General"},
         ]
     },
     "satchel": {
@@ -105,7 +111,7 @@ mock_inventory = {
         "enabled": True,
         "items": [
             {"slot": 0, "id": 646, "name": "Fire Crystal", "count": 12, "category": "Crystal"},
-            {"slot": 1, "id": 647, "name": "Ice Crystal", "count": 12, "category": "Crystal"}
+            {"slot": 1, "id": 647, "name": "Ice Crystal",  "count": 12, "category": "Crystal"},
         ]
     },
     "wardrobe": {
@@ -114,8 +120,8 @@ mock_inventory = {
         "max": 80,
         "enabled": True,
         "items": [
-            {"slot": 0, "id": 12416, "name": "Bronze Harness", "count": 1, "category": "Armor"},
-            {"slot": 1, "id": 12545, "name": "Bronze Subligar", "count": 1, "category": "Armor"}
+            {"slot": 0, "id": 12416, "name": "Bronze Harness",  "count": 1, "category": "Body"},
+            {"slot": 1, "id": 12545, "name": "Bronze Subligar", "count": 1, "category": "Legs"},
         ]
     },
     "wardrobe2": {
@@ -124,7 +130,7 @@ mock_inventory = {
         "max": 80,
         "enabled": True,
         "items": [
-            {"slot": 0, "id": 15040, "name": "Brass Cap", "count": 1, "category": "Armor"}
+            {"slot": 0, "id": 15040, "name": "Brass Cap", "count": 1, "category": "Head"},
         ]
     }
 }
@@ -262,7 +268,11 @@ def api_get_settings():
     return jsonify({
         "settings": mock_settings,
         "catalog": catalog,
-        "categories": ["Weapon", "Armor", "Ranged", "Ammo", "Food", "Usable", "Crystal", "Currency", "General"]
+        "categories": [
+            "Main", "Sub", "Ranged", "Ammo",
+            "Head", "Body", "Hands", "Legs", "Feet", "Neck", "Waist", "Earring", "Ring", "Back",
+            "Food", "Usable", "Crystal", "Currency", "General",
+        ]
     })
 
 @app.route('/api/settings', methods=['POST'])
@@ -283,148 +293,105 @@ def api_save_settings():
         return jsonify({"ok": True, "settings": mock_settings})
     return jsonify({"ok": False, "error": "Invalid data"}), 400
 
+def compute_preview(rules, enabled_bags):
+    """Compute planned moves by matching rules against the live mock inventory.
+
+    Mirrors the logic in lib/sorter.lua:build_plan so that saving rules in the
+    UI actually changes what shows up in the preview.
+    """
+    moves = []
+    unmatched = []
+
+    # Initial capacity snapshot (before any simulated moves).
+    initial_usage = {}
+    for bag_key, bag_data in mock_inventory.items():
+        if enabled_bags.get(bag_key, False):
+            initial_usage[bag_key] = len(bag_data["items"])
+
+    sim_usage = dict(initial_usage)
+
+    # Build a catalog lookup keyed by bag key for fast target lookup.
+    catalog_by_key = {b["key"]: b for b in BAG_CATALOG}
+
+    for bag_key, bag_data in mock_inventory.items():
+        if not enabled_bags.get(bag_key, False):
+            continue
+        for item in bag_data["items"]:
+            matched_rule = None
+            for rule in rules:
+                cat      = rule.get("category", "ALL")
+                wildcard = rule.get("wildcard", "")
+                # Category condition: absent/empty/"ALL" matches anything.
+                cat_ok  = (not cat or cat == "ALL" or cat == item["category"])
+                # Wildcard condition: absent/empty matches anything.
+                if not wildcard:
+                    name_ok = True
+                else:
+                    name_ok = fnmatch.fnmatch(item["name"].lower(), wildcard.lower())
+                if cat_ok and name_ok:
+                    matched_rule = rule
+                    break
+
+            if matched_rule:
+                target_key = matched_rule.get("target", "")
+                target_info = catalog_by_key.get(target_key)
+                if not target_info:
+                    continue  # unknown target bag
+                if not enabled_bags.get(target_key, False):
+                    continue  # target not enabled
+                if target_key == bag_key:
+                    continue  # item is already there
+
+                hops = 1 if (bag_key == "inventory" or target_key == "inventory") else 2
+                meta = ITEM_META.get(item.get("id", 0), {})
+                move = {
+                    "name":      item["name"],
+                    "count":     item.get("count", 1),
+                    "id":        item.get("id"),
+                    "category":  item["category"],
+                    "from_key":  bag_key,
+                    "from_name": bag_data["name"],
+                    "to":        target_key,
+                    "to_key":    target_key,
+                    "to_name":   target_info["name"],
+                    "hops":      hops,
+                }
+                for k, v in meta.items():
+                    move.setdefault(k, v)
+                moves.append(move)
+                sim_usage[target_key] = sim_usage.get(target_key, 0) + 1
+                sim_usage[bag_key]    = max(0, sim_usage.get(bag_key, 0) - 1)
+            else:
+                unmatched.append({
+                    "name":     item["name"],
+                    "count":    item.get("count", 1),
+                    "bag_name": bag_data["name"],
+                })
+
+    # Build capacity report keyed by bag key (matches renderPlan expectations).
+    capacity = {}
+    for bag_key in initial_usage:
+        bag_data = mock_inventory.get(bag_key, {})
+        max_slots = bag_data.get("max", 80)
+        before = initial_usage[bag_key]
+        after  = sim_usage.get(bag_key, before)
+        capacity[bag_key] = {
+            "name":   bag_data.get("name", bag_key),
+            "before": before,
+            "after":  after,
+            "max":    max_slots,
+            "over":   after > max_slots,
+            "pct":    round(after / max(1, max_slots) * 100),
+        }
+
+    return {"moves": moves, "capacity": capacity, "unmatched": unmatched, "warnings": []}
+
+
 @app.route('/api/preview', methods=['POST'])
 def api_preview():
-    """Generates a preview of moves based on current rules"""
-    # Mock preview data
-    moves = [
-        {
-            "name": "Bronze Sword",
-            "count": 1,
-            "from": "inventory",
-            "from_name": "Inventory",
-            "to": "wardrobe",
-            "to_name": "Mog Wardrobe",
-            "hops": 1,
-            "steps": [
-                {"from": "inventory", "to": "wardrobe", "item": "Bronze Sword"}
-            ]
-        },
-        {
-            "name": "Hi-Potion",
-            "count": 12,
-            "from": "inventory",
-            "from_name": "Inventory",
-            "to": "sack",
-            "to_name": "Mog Sack",
-            "hops": 1,
-            "steps": [
-                {"from": "inventory", "to": "sack", "item": "Hi-Potion"}
-            ]
-        },
-        {
-            "name": "Meat Mithkabob",
-            "count": 6,
-            "from": "inventory",
-            "from_name": "Inventory",
-            "to": "sack",
-            "to_name": "Mog Sack",
-            "hops": 1,
-            "steps": [
-                {"from": "inventory", "to": "sack", "item": "Meat Mithkabob"}
-            ]
-        },
-        {
-            "name": "Bronze Harness",
-            "count": 1,
-            "from": "inventory",
-            "from_name": "Inventory",
-            "to": "wardrobe2",
-            "to_name": "Mog Wardrobe 2",
-            "hops": 1,
-            "steps": [
-                {"from": "inventory", "to": "wardrobe2", "item": "Bronze Harness"}
-            ]
-        },
-        {
-            "name": "Mythril Sword",
-            "count": 1,
-            "from": "inventory",
-            "from_name": "Inventory",
-            "to": "wardrobe",
-            "to_name": "Mog Wardrobe",
-            "hops": 1,
-            "steps": [
-                {"from": "inventory", "to": "wardrobe", "item": "Mythril Sword"}
-            ]
-        },
-        {
-            "name": "Kite Shield",
-            "count": 1,
-            "from": "inventory",
-            "from_name": "Inventory",
-            "to": "wardrobe",
-            "to_name": "Mog Wardrobe",
-            "hops": 1,
-            "steps": [
-                {"from": "inventory", "to": "wardrobe", "item": "Kite Shield"}
-            ]
-        },
-        {
-            "name": "Long Sword",
-            "count": 1,
-            "from": "safe",
-            "from_name": "Mog Safe",
-            "to": "wardrobe",
-            "to_name": "Mog Wardrobe",
-            "hops": 2,
-            "steps": [
-                {"from": "safe", "to": "inventory", "item": "Long Sword"},
-                {"from": "inventory", "to": "wardrobe", "item": "Long Sword"}
-            ]
-        },
-        {
-            "name": "Chainmail",
-            "count": 1,
-            "from": "safe",
-            "from_name": "Mog Safe",
-            "to": "wardrobe2",
-            "to_name": "Mog Wardrobe 2",
-            "hops": 2,
-            "steps": [
-                {"from": "safe", "to": "inventory", "item": "Chainmail"},
-                {"from": "inventory", "to": "wardrobe2", "item": "Chainmail"}
-            ]
-        }
-    ]
-    
-    # Enrich each move with item id + metadata (mimics live sorter output)
-    name_lookup = {}
-    for data in mock_inventory.values():
-        for it in data["items"]:
-            name_lookup.setdefault(it["name"], it)
-    for mv in moves:
-        base = name_lookup.get(mv["name"], {})
-        if "id" in base:
-            mv.setdefault("id", base["id"])
-        if "category" in base:
-            mv.setdefault("category", base["category"])
-        meta = ITEM_META.get(base.get("id"), {})
-        for k, v in meta.items():
-            mv.setdefault(k, v)
-
-    capacity_impact = [
-        {"bag": "wardrobe", "before": 2, "after": 6, "max": 80, "percent": 7.5, "warning": False},
-        {"bag": "wardrobe2", "before": 1, "after": 3, "max": 80, "percent": 3.75, "warning": False},
-        {"bag": "sack", "before": 2, "after": 4, "max": 80, "percent": 5.0, "warning": False}
-    ]
-    
-    unmatched = [
-        {"item": "Fire Crystal", "bag": "inventory", "category": "Crystal"},
-        {"item": "Beastman Seal", "bag": "inventory", "category": "Currency"}
-    ]
-    
-    return jsonify({
-        "ok": True,
-        "plan": {
-            "moves": moves,
-            "capacity_impact": capacity_impact,
-            "unmatched": unmatched,
-            "total_moves": len(moves),
-            "total_hops": sum(m["hops"] for m in moves),
-            "warnings": []
-        }
-    })
+    """Generate a preview of planned moves based on current rules."""
+    plan = compute_preview(mock_settings["rules"], mock_settings["enabled_bags"])
+    return jsonify({"ok": True, "plan": plan})
 
 @app.route('/api/execute', methods=['POST'])
 def api_execute():
