@@ -9,16 +9,11 @@
 
 const state = {
     settings: { enabled_bags: {}, rules: [], move_delay: 0.7, port: 9898 },
-    catalog: [],        // [{key,name,id,note}]
-    categories: [],     // ["Weapon","Armor",...]
-    status: null,       // last /api/status response
-    plan: null,         // last preview plan
+    catalog: [],        
+    status: null,       
+    plan: null,         
     progressTimer: null,
 };
-
-/* ------------------------------------------------------------------ */
-/* Small helpers                                                       */
-/* ------------------------------------------------------------------ */
 
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -75,12 +70,6 @@ function nameForBag(key) {
     return b ? b.name : key;
 }
 
-/* ------------------------------------------------------------------ */
-/* Item icons + description tooltip                                    */
-/* ------------------------------------------------------------------ */
-
-// Build the icon URL for an item id from the configured base URL.
-// Returns null when icons are disabled or no base URL / id is available.
 function iconUrl(id) {
     if (!state.settings || state.settings.show_icons === false) return null;
     const base = state.settings.icon_base_url;
@@ -88,8 +77,6 @@ function iconUrl(id) {
     return base + id + '.png';
 }
 
-// Create an icon element for an item, with a graceful fallback placeholder
-// (the item's first letter) if the CDN image is missing or icons are off.
 function makeIcon(item) {
     const wrap = el('span', { class: 'item-icon' });
     const url = iconUrl(item.id);
@@ -104,7 +91,6 @@ function makeIcon(item) {
     return wrap;
 }
 
-// Shared floating tooltip element (created once).
 let _tip = null;
 function ensureTip() {
     if (!_tip) {
@@ -114,7 +100,6 @@ function ensureTip() {
     return _tip;
 }
 
-// Build the tooltip HTML for an item from its metadata.
 function tipHtml(item) {
     const rows = [];
     rows.push(`<div class="tip-head">${esc(item.name || 'Unknown')}</div>`);
@@ -131,7 +116,6 @@ function tipHtml(item) {
     return rows.join('');
 }
 
-// Wire hover/focus behaviour on a row element to show the item tooltip.
 function attachTip(node, item) {
     const show = (e) => {
         const tip = ensureTip();
@@ -155,10 +139,6 @@ function attachTip(node, item) {
     node.addEventListener('mouseleave', hide);
 }
 
-/* ------------------------------------------------------------------ */
-/* Tabs                                                                */
-/* ------------------------------------------------------------------ */
-
 function initTabs() {
     $$('.tab').forEach(tab => {
         tab.addEventListener('click', () => {
@@ -171,10 +151,6 @@ function initTabs() {
     });
 }
 
-/* ------------------------------------------------------------------ */
-/* Tab 1: Inventory Status                                             */
-/* ------------------------------------------------------------------ */
-
 async function loadStatus() {
     const list = $('#status-list');
     list.innerHTML = '<div class="empty">Loading…</div>';
@@ -183,8 +159,6 @@ async function loadStatus() {
         setConn(true);
         state.status = data;
         renderStatus(data.bags || []);
-        // The status catalog carries live slot counts + availability badges,
-        // so re-render the Bag Settings toggles now that we have richer data.
         if (data.catalog) renderBagToggles();
     } catch (e) {
         setConn(false);
@@ -236,14 +210,9 @@ function renderStatus(bags) {
     });
 }
 
-/* ------------------------------------------------------------------ */
-/* Tab 2: Bag Settings                                                 */
-/* ------------------------------------------------------------------ */
-
 function renderBagToggles() {
     const wrap = $('#bag-toggles');
     wrap.innerHTML = '';
-    // Prefer live catalog from /api/status (has used/max); fall back to settings catalog.
     const catalog = (state.status && state.status.catalog) || state.catalog.map(c => ({
         ...c, enabled: !!state.settings.enabled_bags[c.key], used: 0, max: 80,
     }));
@@ -257,17 +226,15 @@ function renderBagToggles() {
         input.addEventListener('change', () => {
             state.settings.enabled_bags[b.key] = input.checked;
             card.classList.toggle('disabled', !input.checked);
-            populateMuleBagDropdown(); // update mule bag options when bags change
+            populateMuleBagDropdown();
         });
 
-        // Detection badge: reflects what the game reports as accessible right now.
-        // Inventory is always accessible. `available` comes from /api/status.
         const available = isInv || b.available === true;
         const badge = el('span', {
             class: 'detect-badge ' + (available ? 'detected' : 'unavailable'),
             title: available
                 ? 'AutoSort can see this bag right now.'
-                : 'Not accessible right now (e.g. a Mog House bag while you are out in the field). You can still enable it — it just won\'t be sorted until you have access.',
+                : 'Not accessible right now (e.g. a Mog House bag while you are out in the field).',
         }, available ? '✓ Detected' : 'Not accessible');
 
         const name = el('div', { class: 'name' }, b.name, badge);
@@ -297,7 +264,6 @@ function populateMuleBagDropdown() {
         }
     });
     
-    // Restore the previous selection if it's still valid
     if (state.settings.mule_bag && state.settings.enabled_bags[state.settings.mule_bag]) {
         select.value = state.settings.mule_bag;
     } else if (currentValue && state.settings.enabled_bags[currentValue]) {
@@ -309,8 +275,6 @@ function populateMuleBagDropdown() {
 
 async function saveBagSettings() {
     state.settings.move_delay = parseFloat($('#move-delay').value) || 0.7;
-    // Send '' (empty string) rather than null so the Lua backend reliably
-    // clears the mule bag — JSON null can decode to an absent key in Lua.
     state.settings.mule_bag = $('#mule-bag').value || '';
     try {
         const res = await api('settings', 'POST', {
@@ -331,9 +295,6 @@ async function saveBagSettings() {
     }
 }
 
-// Ask the game which bags are accessible right now. The backend auto-enables
-// any newly-seen bags (leaving your manual choices untouched) and returns the
-// refreshed settings. We then re-render toggles + status so the badges update.
 async function detectBags() {
     const btn = $('#settings-detect');
     if (btn) { btn.disabled = true; btn.textContent = '🔍 Detecting…'; }
@@ -345,7 +306,7 @@ async function detectBags() {
             toast(n > 0
                 ? `Detected & enabled ${n} new bag(s).`
                 : 'Scan complete — no new bags found.', 'ok');
-            await loadStatus();      // refreshes catalog + availability badges
+            await loadStatus();      
             renderBagToggles();
             populateMuleBagDropdown();
         } else {
@@ -358,45 +319,32 @@ async function detectBags() {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Tab 3: Sort Rules                                                   */
-/* ------------------------------------------------------------------ */
-
 function populateTargetDropdowns() {
-    const targets = state.catalog; // all bags valid as targets
+    const targets = state.catalog;
     const fill = (sel) => {
         sel.innerHTML = '';
         targets.forEach(b => sel.appendChild(el('option', { value: b.key }, b.name)));
     };
     fill($('#new-rule-target'));
-
-    const catSel = $('#new-rule-category');
-    catSel.innerHTML = '';
-    state.categories.forEach(c => catSel.appendChild(el('option', { value: c }, c)));
 }
 
 function initRuleForm() {
-    const typeSel = $('#new-rule-type');
-    const patternInput = $('#new-rule-pattern');
     const catSel = $('#new-rule-category');
-
-    typeSel.addEventListener('change', () => {
-        if (typeSel.value === 'category') {
-            patternInput.classList.add('hidden');
-            catSel.classList.remove('hidden');
-        } else {
-            patternInput.classList.remove('hidden');
-            catSel.classList.add('hidden');
-        }
-    });
+    const wildcardInput = $('#new-rule-wildcard');
 
     $('#add-rule').addEventListener('click', () => {
-        const type = typeSel.value;
-        const pattern = type === 'category' ? catSel.value : patternInput.value.trim();
+        const category = catSel.value;
+        const wildcard = wildcardInput.value.trim();
         const target = $('#new-rule-target').value;
-        if (!pattern) { toast('Enter an item name or pick a category.', 'err'); return; }
-        state.settings.rules.push({ match_type: type, pattern, target });
-        patternInput.value = '';
+
+        if (category === 'ALL' && !wildcard) {
+            toast('Please select a category or enter a wildcard.', 'err');
+            return;
+        }
+
+        state.settings.rules.push({ category, wildcard, target });
+        wildcardInput.value = '';
+        catSel.value = 'ALL';
         renderRules();
         toast('Rule added (remember to Save).');
     });
@@ -411,9 +359,8 @@ function renderRules() {
         return;
     }
     rules.forEach((r, i) => {
-        const tag = r.match_type === 'category'
-            ? el('span', { class: 'tag tag-cat' }, 'Category')
-            : el('span', { class: 'tag tag-name' }, 'Name');
+        const catDisplay = el('span', { class: 'tag tag-cat' }, r.category || 'ALL');
+        const wildcardDisplay = el('span', { class: 'mono' }, r.wildcard || '*');
 
         const targetSel = el('select');
         state.catalog.forEach(b => {
@@ -432,8 +379,8 @@ function renderRules() {
 
         body.appendChild(el('tr', {},
             el('td', {}, String(i + 1)),
-            el('td', {}, tag),
-            el('td', { class: 'mono' }, r.pattern),
+            el('td', {}, catDisplay),
+            el('td', {}, wildcardDisplay),
             el('td', {}, targetSel),
             el('td', {}, upBtn, downBtn, delBtn),
         ));
@@ -465,10 +412,6 @@ async function saveRules() {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Tab 4: Preview & Execute                                            */
-/* ------------------------------------------------------------------ */
-
 async function generatePreview() {
     try {
         const res = await api('preview', 'POST');
@@ -483,7 +426,6 @@ async function generatePreview() {
 }
 
 function renderPlan(plan) {
-    // Warnings
     const warnBox = $('#preview-warnings');
     if (plan.warnings && plan.warnings.length) {
         warnBox.classList.remove('hidden');
@@ -494,7 +436,6 @@ function renderPlan(plan) {
         warnBox.innerHTML = '';
     }
 
-    // Moves
     const body = $('#moves-body');
     body.innerHTML = '';
     $('#move-count').textContent = plan.moves.length;
@@ -520,7 +461,6 @@ function renderPlan(plan) {
         });
     }
 
-    // Capacity
     const capWrap = $('#capacity-list');
     capWrap.innerHTML = '';
     const caps = plan.capacity || {};
@@ -542,7 +482,6 @@ function renderPlan(plan) {
         });
     }
 
-    // Unmatched
     const unWrap = $('#unmatched-list');
     unWrap.innerHTML = '';
     $('#unmatched-count').textContent = (plan.unmatched || []).length;
@@ -603,17 +542,12 @@ async function stopSort() {
     toast('Sort stopped.');
 }
 
-/* ------------------------------------------------------------------ */
-/* Bootstrap                                                           */
-/* ------------------------------------------------------------------ */
-
 async function loadSettings() {
     try {
         const res = await api('settings');
         setConn(true);
         state.settings = res.settings;
         state.catalog = res.catalog || [];
-        state.categories = res.categories || [];
         $('#move-delay').value = state.settings.move_delay ?? 0.7;
         populateTargetDropdowns();
         populateMuleBagDropdown();
@@ -631,7 +565,6 @@ function initButtons() {
     $('#settings-save').addEventListener('click', saveBagSettings);
     $('#settings-detect').addEventListener('click', detectBags);
     $('#rules-save').addEventListener('click', saveRules);
-    $('#add-rule') && null; // wired in initRuleForm
     $('#generate-preview').addEventListener('click', generatePreview);
     $('#execute-sort').addEventListener('click', executeSort);
     $('#stop-sort').addEventListener('click', stopSort);
