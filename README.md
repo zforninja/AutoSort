@@ -1,197 +1,274 @@
-# AutoSort
+# AutoSort 2.2
 
-**Automatic FFXI inventory sorting for [Windower 4](https://www.windower.net/).**
+**Rule-driven inventory sorting for [Windower 4](https://www.windower.net/) that
+works out of the box.** Load it, type `//as sort`, and it sorts based on the
+items you own and the bags you can actually reach. Add your own rules only where
+you disagree.
 
-AutoSort moves items across every FFXI storage container using rules you define, driven by a clean local Web UI. Because FFXI does not allow moving an item directly between two non‑Inventory bags, AutoSort automatically routes every transfer through your Inventory as an intermediate.
+![Platform](https://img.shields.io/badge/platform-Windower%204-blue)
+![Game](https://img.shields.io/badge/FFXI-retail-9cf)
+![Lua](https://img.shields.io/badge/Lua-5.1%20%2F%20LuaJIT-000080)
+![Version](https://img.shields.io/badge/version-2.2.0-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
----
+> **Upgrading from 1.x?** 2.0 is a ground-up rewrite: sorting is now driven by
+> chat commands and a per-character rule file with sensible built-in defaults,
+> the Web UI is a drag-and-drop editor rather than the primary interface, and
+> every move is verified after it happens. See [CHANGELOG.md](CHANGELOG.md) for
+> the full list and a migration note.
 
-## Features
+## Table of contents
 
-- **Local Web UI** at `http://127.0.0.1:9898` — opens in your normal browser when the add‑on loads.
-- **Inventory Status** — live view of every enabled bag, slot usage, and contents.
-- **Item icons & tooltips** — every item row (in Status *and* the move preview) shows its real FFXI icon, and hovering reveals a rich tooltip (category, slot, level, usable jobs, description/stats, item ID) so you can make informed sorting decisions at a glance.
-- **Bag Settings** — toggle exactly which of the 16 storage containers you own (Wardrobe 3–8, Locker, Satchel, Sack, etc.).
-- **Automatic bag detection** — AutoSort asks the game which containers you can actually access (via `windower.ffxi.get_bag_info`) and **auto-enables new bags for you the first time it sees them** — so you never accidentally leave a real bag out. Each bag shows a live **✓ Detected** / **Not accessible** badge, and a **🔍 Auto-detect bags** button (or `//autosort detect`) re-scans on demand. Crucially, once a bag has been seen its on/off state is *yours* — auto-detect will never flip a toggle you set manually.
-- **Sort Rules** — map item **names** (with `*` wildcards) or **categories** to a target bag. Rules are evaluated top‑to‑bottom, first match wins. **No default rules — you define everything.**
-- **Preview & Execute** — see every planned move, per‑bag capacity impact (before → after, with over‑capacity warnings), and a list of unmatched items *before* anything moves.
-- **Safe execution** — moves run one at a time with a configurable delay to avoid server rejections. Full bags and inaccessible containers are skipped with a warning.
-- **Persistent settings** — everything is saved to `data/settings.json` and survives reloads.
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [The built-in defaults](#the-built-in-defaults)
+- [Overriding the defaults](#overriding-the-defaults)
+- [The Web UI](#the-web-ui)
+- [The rule file](#the-rule-file)
+- [Commands](#commands)
+- [How it works](#how-it-works)
+- [What AutoSort will not move](#what-autosort-will-not-move)
+- [Troubleshooting](#troubleshooting)
+- [Known limits](#known-limits)
+- [Project structure](#project-structure)
+- [Changelog](#changelog)
+- [License](#license)
 
----
+## Quick start
 
-## Installation
+Copy this folder to `<Windower4>\addons\AutoSort\`, then in game:
 
-1. Locate your Windower `addons` folder, typically:
-   ```
-   <Windower4>\addons\
-   ```
-2. Copy the entire `AutoSort` folder into it so you have:
-   ```
-   <Windower4>\addons\AutoSort\AutoSort.lua
-   <Windower4>\addons\AutoSort\lib\...
-   <Windower4>\addons\AutoSort\ui\...
-   ```
-3. In game, load the add‑on:
-   ```
-   //lua load AutoSort
-   ```
-4. AutoSort prints the Web UI URL to chat. Open it with:
-   ```
-   //autosort open
-   ```
+```
+//lua load AutoSort
+//as preview        see what a sort would do; nothing moves
+//as sort           preview, then confirm with //as yes
+```
 
-To load automatically at launch, add `lua load AutoSort` to your `scripts/init.txt`.
+For a visual editor: `//as open` (drag items onto bags to make rules).
 
----
+## Requirements
+
+- **Windower 4** with the `resources` library it ships with (used for item
+  names, categories, and furniture detection).
+- **Final Fantasy XI** (retail). No third-party servers are targeted.
+- **Lua 5.1 / LuaJIT** — the runtime Windower 4 already embeds. Nothing to
+  install separately.
+- **GearSwap (optional).** If present, gear referenced by your GearSwap files is
+  automatically protected so a sort never leaves it un-equippable. Without
+  GearSwap, everything else still works; only that protection is skipped.
+
+## The built-in defaults
+
+With no rules written, AutoSort applies these, in order. Each group names a
+**chain** of bags. An item goes to the first bag in its chain that exists, is
+reachable right now, and has room. Bags you do not own, or cannot reach outside
+your Mog House, simply drop out of the chain.
+
+| Group | What it matches | Where it goes |
+| --- | --- | --- |
+| Essentials | Echo Drops, Remedy, Holy Water, Instant Warp, ... | Stays put |
+| Currency | Currency-type items | Stays put |
+| Crystals | `*Crystal`, `*Cluster` | Case, Sack, Satchel |
+| Furniture | Furniture | Storage, Safe, Locker, Safe 2 |
+| Gear | Anything equippable | Wardrobes 1 to 8, then Safe, Locker, Safe 2 |
+| Consumables | Usable items | Stay in Inventory; overflow to Satchel, Sack, Case only if Inventory is crowded |
+| Everything else | General items | Case, Safe, Locker, Safe 2, Sack, Satchel |
+
+Design choices worth knowing:
+
+* **Stable.** An item already in a bag of its chain, or in Safe, Locker, Safe 2
+  or Storage, stays put. Sorting twice never reshuffles, and a stash you built
+  on purpose is left alone.
+* **Inventory is a working bag.** You must hold an item in Inventory to use it,
+  so consumables leave only when Inventory is crowded, and only enough to reach
+  the free-slot target (`auto` is a quarter of your Inventory, at least five).
+* **Gear stays equippable.** Only Inventory and Wardrobes can supply gear to an
+  equip command, so gear goes to Wardrobes first, and gear your GearSwap files
+  reference is never moved anywhere else.
+* **Never nags.** If a default group has no reachable bag (say, no Wardrobes
+  yet), those items are left alone quietly rather than reported as errors.
+
+## Overriding the defaults
+
+Your rules are checked first and the first match wins, so anything you write
+overrides the defaults. Defaults still handle everything you did not cover.
+
+```
+//as defaults              show every group, its state, and its chain
+//as defaults gear off     switch one group off
+//as defaults off          switch all defaults off (your rules only)
+//as defaults free 15      keep 15 Inventory slots free (or: auto)
+//as explain iron sword    which rule applies to an item, and what happens
+//as check                 how your items are being categorized
+```
+
+## The Web UI
+
+`//as open` launches it in your browser.
+
+**Layout** shows every bag with its items.
+
+* **Drag an item onto a bag** to make a rule that keeps it there.
+* **Click items to select several,** then drag any one of them, or press
+  *Move here* on a bag.
+* A drop makes a rule for **the item**, **its category**, or **its slot**.
+  Choose with the switch, or press **Shift** (category) or **Alt** (slot)
+  *while dragging*.
+* Dropping something onto a bag that cannot hold it (a crystal onto a
+  gear-only Wardrobe) is refused.
+* Rules land in the right order automatically: item rules above slot rules
+  above category rules, so a specific rule is never hidden by a broad one.
+* **Current / After sort.** Every change re-plans with your *unsaved* rules, so
+  *After sort* shows exactly where everything will end up before anything is
+  saved or moved. Items that will move carry an arrow; arrivals show where they
+  came from.
+
+**Rules** has the defaults card (toggle groups, see each chain with unreachable
+bags struck through) and your own rule list. **Preview & Sort** shows every
+planned move tagged *your rule* or the default group responsible.
+
+Rules save to `data/<Character>.lua` and the UI and chat commands share that
+one file. The previous file is kept as `.bak` on every save.
+
+Security: the server binds to `127.0.0.1` only and needs a random session key
+that changes each time it starts. `//as open` includes it in the URL, so
+typing `localhost:9898` by hand will not work. This is deliberate.
+
+## The rule file
+
+`data/<Character>.lua` (created by `//as setup`, or by saving from the UI):
+
+```lua
+return {
+    options = {
+        delay        = 0.8,   -- seconds between moves
+        keep_free    = 2,     -- inventory slots never filled by a sort
+        protect_gear = true,  -- keep GearSwap-referenced gear equippable
+        protect      = { 'Warp Ring' },
+    },
+
+    defaults = {
+        enabled        = true,
+        inventory_free = "auto",     -- or a number
+        essentials = true, currency = true, crystals = true, furniture = true,
+        gear = true, consumables = true, misc = true,
+    },
+
+    rules = {
+        { match = 'Hi-Potion', to = 'keep'     },
+        { match = '*Ninja Tool*', to = 'sack'  },
+        { category = 'Head',   to = 'wardrobe2' },
+    },
+}
+```
+
+**Fields.** `match` is an item name with `*` wildcards, case-insensitive.
+`category` is `Equipment`, `Weapon`, `Armor`, `General`, `Usable`, `Crystal`,
+`Currency`, `Furniture`, or a slot: `Main Sub Ranged Ammo Head Body Hands Legs
+Feet Neck Waist Ear Ring Back`. `to` is a bag key or `keep`.
+
+**Bags:** `inventory safe storage locker satchel sack case wardrobe wardrobe2
+... wardrobe8 safe2`.
+
+A rule with neither `match` nor `category` matches everything, so the UI never
+saves one.
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `//autosort open` | Open the Web UI in your default browser. |
-| `//autosort url` | Print the Web UI URL to chat. |
-| `//autosort start` | (Re)start the HTTP server. |
-| `//autosort stop` | Stop the HTTP server. |
-| `//autosort reload` | Reload settings from `data/settings.json`. |
-| `//autosort detect` | Re-scan accessible bags and auto-enable any newly-seen ones. |
-| `//autosort port <n>` | Change the server port (then `//autosort start`). |
-| `//autosort sort` | Preview and immediately execute a sort from chat. |
+| Command | What it does |
+| --- | --- |
+| `//as preview [bag\|all]` | Show planned moves without moving anything |
+| `//as sort [bag]` | Preview, then confirm with `//as yes` |
+| `//as go [bag]` | Sort immediately, no confirmation |
+| `//as stop` | Abort a running sort |
+| `//as status` | Slot usage for every accessible bag |
+| `//as rules` | List your rules |
+| `//as defaults ...` | Show or change the built-in defaults |
+| `//as explain <item>` | What a sort would do with an item, and why |
+| `//as check` | How your items are being categorized |
+| `//as setup` / `reload` | Create / re-read the rule file |
+| `//as open` / `url` | Open the Web UI / print its address |
+| `//as start` / `stop server` / `port <n>` | Control the Web UI server |
+| `//as gear` | Re-scan GearSwap for protected gear |
 
-Short alias: `//asort` works everywhere `//autosort` does.
+`//as` and `//autosort` are interchangeable.
 
----
+## How it works
 
-## Usage
+FFXI cannot move items directly between two non-Inventory bags, so those moves
+go through Inventory in two hops. The planner simulates free space and schedules
+moves in waves so a bag is never overfilled. If two full bags must swap
+contents, it parks an item in Inventory to break the deadlock; this needs **two
+free Inventory slots**, and if they are not there the moves are reported as
+blocked rather than attempted. A parked item is never left stranded.
 
-1. **Bag Settings tab** — enable the storage containers you actually own. Inventory is always on because it is the required intermediate for every move.
-   - **Mule Bag (optional)** — designate one bag as your "mule outbox" for items destined for secondary characters. Items routed to this bag will be highlighted with **📦 For Mule** in the preview, making it easy to transfer them to alts via the delivery box.
-2. **Sort Rules tab** — add rules. For each rule choose:
-   - **Type**: `Name` (matches the item name, supports `*` wildcards) or `Category` (matches a broad item type).
-   - **Match**: the pattern or category.
-   - **Target Bag**: where matching items should go.
-   Use the ↑ / ↓ buttons to order rules — the **first** matching rule wins. Click **Save Rules**.
-3. **Preview & Execute tab** — click **Generate Preview** to see all planned moves, capacity impact, and unmatched items. When you're happy, click **Execute Sort** and watch the progress log.
+Every hop is verified by comparing the destination's total of that item before
+and after. A hop that does not land within five seconds is reported as failed
+and the run continues. A running sort aborts on zone change or logout.
 
----
+## What AutoSort will not move
 
-## Mule Bag (transferring items to alts)
+* Equipped items, or anything else the game marks as in use
+* Items on your `protect` list
+* Gear referenced by your GearSwap files, anywhere but Inventory and Wardrobes
+* Items into a bag that cannot hold them
+* Anything matching no rule
 
-AutoSort can gather items destined for secondary characters into a designated "mule bag" to make manual transfers safer and easier:
+AutoSort never drops, sells, or deletes anything.
 
-1. In **Bag Settings**, choose a **Mule Bag** from the dropdown (e.g. Mog Sack).
-2. Create sorting rules that route items to that bag (e.g. `Category: Weapon → Mog Sack`).
-3. Generate a preview — items going to your mule bag will be highlighted with **📦 For Mule** and shown with a green tint.
-4. After execution, all items for your alt are collected in one place. Walk to any moogle and manually send them via the delivery box.
+## Troubleshooting
 
-**Why manual?** Direct automation via packet injection is risky and ban-sensitive. This staging approach gives you 90% of the convenience with zero risk.
+| Symptom | What to check |
+| --- | --- |
+| **Almost everything reads as `General`** | Run `//as check`. If categories look wrong across the board, your Windower `resources` build is likely stale — update Windower. Report it if updating does not help. |
+| **A default group moves nothing** | The group's whole chain may be unreachable (e.g. no Wardrobes, or you are outside your Mog House). That is intentional — AutoSort leaves those items alone rather than erroring. Use `//as status` to see which bags are reachable. |
+| **`localhost:9898` shows nothing** | The Web UI needs the random session key in the URL. Always launch it with `//as open` (or copy the address from `//as url`); a bare `localhost` URL is refused by design. |
+| **Moves reported as blocked** | A full-bag swap needs at least two free Inventory slots to park an item. Free some Inventory and sort again, or raise `keep_free`. |
+| **Gear I use went to a Wardrobe I did not want** | GearSwap-referenced gear is protected only from leaving Inventory/Wardrobes. Pin specific pieces with a rule (`{ match = 'My Item', to = 'keep' }`) or add them to `options.protect`. |
+| **A sort seems stuck** | `//as stop` aborts immediately. Sorts also abort automatically on zone change or logout. |
 
----
+## Known limits
 
-## Rule configuration examples
-
-| Type | Match | Target Bag | Effect |
-|---|---|---|---|
-| Name | `*Sword*` | Mog Sack | Any item with "Sword" in its name → Mog Sack |
-| Name | `Excalibur` | Mog Wardrobe 1 | Exactly "Excalibur" → Wardrobe 1 |
-| Category | `Food` | Mog Satchel | All food items → Satchel |
-| Category | `Crystal` | Mog Sack | All crystals → Sack |
-| Name | `*Ore` | Mog Case | Any item ending in "Ore" → Case |
-| Category | `Currency` | Mog Safe 1 | Currency items → Safe 1 |
-
-**Wildcards:** `*` matches any sequence of characters. Matching is case‑insensitive.
-- `*Potion*` → matches "Hi‑Potion", "Potion +1", etc.
-- `Fire *` → matches "Fire Crystal", "Fire Cluster".
-- `Excalibur` (no `*`) → exact match only.
-
-**Categories** available: `Weapon`, `Armor`, `Ranged`, `Ammo`, `Food`, `Usable`, `Crystal`, `Currency`, `General`.
-
----
-
-## How sorting works (the Inventory intermediate)
-
-FFXI forbids moving an item directly between two non‑Inventory bags. AutoSort handles this automatically:
-
-- **Source is Inventory** → `Inventory → target` (1 hop)
-- **Target is Inventory** → `source → Inventory` (1 hop)
-- **Both are other bags** → `source → Inventory → target` (2 hops)
-
-The preview shows a **hops** badge on each move. Two‑hop moves temporarily consume an Inventory slot, so the planner also verifies Inventory has room and warns you if it doesn't.
-
-### Edge cases handled
-
-- **Bag not accessible / unreadable** — skipped, with a warning.
-- **Target bag full** — the move is skipped and reported; other moves continue.
-- **Item already in the correct bag** — silently skipped (no wasted move).
-- **No matching rule** — the item is left exactly where it is and listed under *Unmatched*.
-- **Inventory full during a 2‑hop move** — that move is skipped and reported.
-
----
+* Rules that pull items *into* Inventory compete with the defaults' free-slot
+  target. Your rule wins, so repeated sorts converge slowly.
+* Item categories and furniture detection depend on Windower's resource data.
+  Run `//as check`; if nearly everything reads as General, tell the developer.
+* The default lists (essentials, chains) are opinionated. Every group can be
+  switched off, and any item can be overridden.
 
 ## Project structure
 
 ```
 AutoSort/
-├── AutoSort.lua        Main add-on: events, commands, API glue
+├── AutoSort.lua          Add-on entry point: commands, event loop, wiring
 ├── lib/
-│   ├── bags.lua        Storage container definitions (bag ids/names)
-│   ├── config.lua      Load/save data/settings.json
-│   ├── inventory.lua   Read bag contents & capacities
-│   ├── sorter.lua      Rule matching, move planning, execution
-│   └── server.lua      Non-blocking HTTP server + JSON API
+│   ├── bags.lua          Canonical bag list, IDs, keys, reachability
+│   ├── items.lua         Item metadata + category / slot derivation
+│   ├── inventory.lua     Reading bag contents and capacities
+│   ├── rules.lua         Rule matching + per-character rule-file load/save
+│   ├── baseline.lua      Built-in default rule set (chains)
+│   ├── planner.lua       Classify items, then schedule capacity-safe moves
+│   ├── executor.lua      Perform each hop and verify it landed
+│   ├── api.lua           JSON API handlers for the Web UI
+│   ├── server.lua        Non-blocking localhost HTTP server
+│   └── jsonutil.lua      JSON encode/decode helper
 ├── ui/
-│   ├── index.html      Single-page, tabbed Web UI
-│   ├── app.js          Frontend logic (vanilla JS)
-│   └── style.css       Dark theme
+│   ├── index.html        Web UI shell
+│   ├── app.js            UI state + API client
+│   ├── layout.js         Bag/item layout + Current / After-sort view
+│   ├── rulegen.js        Drag-to-rule generation
+│   └── style.css         Dark theme
 ├── data/
-│   └── settings.json   Your saved bags + rules (auto-created)
-└── README.md
+│   └── .gitkeep          Rule files (data/<Character>.lua) live here, gitignored
+├── README.md
+└── CHANGELOG.md
 ```
 
-## HTTP API (for reference)
+## Changelog
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/status` | All items in enabled bags + full bag catalog (with live `available` flags) |
-| GET | `/api/settings` | Current settings, bag catalog, categories |
-| POST | `/api/settings` | Save enabled bags + rules |
-| POST | `/api/detect` | Detect accessible bags & auto-enable newly-seen ones (respects manual toggles) |
-| POST | `/api/preview` | Build a move plan from current rules |
-| POST | `/api/execute` | Begin executing the last previewed plan |
-| GET | `/api/progress` | Live execution progress + log |
-| POST | `/api/stop` | Abort a running sort |
-
----
-
-## Item icons & descriptions
-
-AutoSort shows a real icon and a detailed tooltip for every item, in both the **Inventory Status** list and the **Preview** move plan. This is done without any scraping or bundled asset packs:
-
-- **Descriptions & attributes come from Windower locally.** The add‑on reads Windower's built‑in `resources` library (`res.items[id]`) to pull each item's description, level, item level, usable jobs, equippable slots, and weapon skill. This is instant, offline, and always in sync with your client.
-- **Icons load by item ID from the FFXIAH CDN.** The UI builds each icon URL as `<icon_base_url><item_id>.png` (default `https://static.ffxiah.com/images/icon/`). Nothing is scraped — the browser just requests the icon for the ID directly. If an icon fails to load, the row falls back to a lettered placeholder.
-
-Two settings control this (Bag Settings tab, or `data/settings.json`):
-
-| Setting | Default | Purpose |
-|---|---|---|
-| `show_icons` | `true` | Show item icons + hover tooltips. Set `false` for a text‑only list. |
-| `icon_base_url` | `https://static.ffxiah.com/images/icon/` | Base URL icons are loaded from. Point it at any host that serves `<id>.png` (e.g. a local mirror) if you'd rather not hit the CDN. |
-
----
-
-## Notes & safety
-
-- The HTTP server binds to `127.0.0.1` only — it is **not** reachable from other machines.
-- Item moves are throttled (default **0.7s** apart, adjustable in Bag Settings) to avoid server‑side rejection.
-- Always run a **Preview** first so you can see exactly what will move.
-- AutoSort never deletes or drops items — it only relocates them between your own storage.
-
-## Supported storage containers
-
-Inventory, Mog Safe 1, Furniture Storage, Mog Locker, Mog Satchel, Mog Sack, Mog Case, Mog Wardrobe 1–8, Mog Safe 2. (Temporary items are intentionally excluded — they cannot be freely moved.)
-
----
+See [CHANGELOG.md](CHANGELOG.md) for the full version history, including the
+1.x → 2.x rewrite and migration notes.
 
 ## License
 
-MIT — see `LICENSE` if included, otherwise free to use and modify.
+Released under the [MIT License](LICENSE).

@@ -1,308 +1,177 @@
 --[[
-    inventory.lua — Read bag contents and expose them in a UI-friendly shape.
+    inventory.lua — Live reads of bag contents and capacity.
 
-    Wraps the Windower FFXI item APIs:
-        windower.ffxi.get_items(bag_id)       -> raw item table for a bag
-        windower.ffxi.get_bag_count(bag_id)    -> capacity of a bag (max slots)
-        res.items[item_id]                     -> static item resource data
+    Everything here reads fresh from the game every call. The planner and the
+    executor both re-read before acting, because slot indices shift as soon as
+    an item moves.
 
-    Item categories are derived from the resource data so sort rules can match
-    on broad types (Weapon, Armor, Food, Currency, etc.) as well as names.
+    Item status values (from the game):
+        0  normal, movable
+        1  equipped
+        5  linkshell equipped / in use
+    Anything other than 0 cannot be moved, so those items are marked locked.
 ]]
 
-local res = require('resources')
 local bags = require('lib/bags')
+local items = require('lib/items')
 
 local inventory = {}
 
--- Map slot bit positions to granular equipment categories used by sort rules.
--- Bit 0 = Main hand, Bit 1 = Sub/Shield, Bit 2 = Ranged, Bit 3 = Ammo.
--- Bits 11/12 are both earring slots; bits 13/14 are both ring slots.
-local SLOT_CATEGORIES = {
-    [0]  = 'Main',    [1]  = 'Sub',     [2]  = 'Ranged', [3]  = 'Ammo',
-    [4]  = 'Head',    [5]  = 'Body',    [6]  = 'Hands',  [7]  = 'Legs',
-    [8]  = 'Feet',    [9]  = 'Neck',    [10] = 'Waist',
-    [11] = 'Earring', [12] = 'Earring',
-    [13] = 'Ring',    [14] = 'Ring',    [15] = 'Back',
-}
-
--- Map a resource item to the slot-based category used by sort rules.
--- Equippable items: derive from the lowest set bit in the slots bitfield
---   (Main / Sub / Ranged / Ammo / Head / Body / Hands / Legs / Feet /
---    Neck / Waist / Earring / Ring / Back).
--- Non-equippable: Food / Usable / Crystal / Currency / General.
-local function derive_category(item_res)
-    if not item_res then return 'General' end
-
-    -- Equippable items carry a slot bitfield; take the lowest set bit.
-    local slots = item_res.slots
-    if type(slots) == 'number' and slots ~= 0 then
-        for bit = 0, 15 do
-            local has_bit
-            if bit32 then
-                has_bit = bit32.band(slots, bit32.lshift(1, bit)) ~= 0
-            else
-                has_bit = math.floor(slots / (2 ^ bit)) % 2 == 1
-            end
-            if has_bit then
-                return SLOT_CATEGORIES[bit] or 'General'
-            end
-        end
-    end
-
-    -- Non-equipment: classify by the broad resource category.
-    local category = item_res.category or ''
-    if category == 'Usable' then
-        if item_res.type == 4 or (item_res.name and item_res.name:lower():find('food')) then
-            return 'Food'
-        end
-        return 'Usable'
-    elseif category == 'Crystal' then
-        return 'Crystal'
-    elseif category == 'Currency' then
-        return 'Currency'
-    end
-    return 'General'
-end
-
--- Windower resources expose job/slot/race bitfields via helper tables that
--- carry a :name()/string form. We defensively stringify whatever we get so a
--- resources build that stores plain strings, tables, or bitfields all work.
-local function stringify_set(value)
-    if value == nil then return nil end
-    if type(value) == 'string' then return value end
-    if type(value) == 'table' then
-        -- Try a few common shapes: array of strings, or map with a tostring.
-        local parts = {}
-        for _, v in ipairs(value) do
-            parts[#parts + 1] = tostring(v)
-        end
-        if #parts > 0 then return table.concat(parts, ' ') end
-        -- Fall back to tostring of the table (some res use metatables).
-        local ok, s = pcall(tostring, value)
-        if ok and s and not s:find('^table:') then return s end
-        return nil
-    end
-    return tostring(value)
-end
-
--- Human-readable equippable slot names from the resources slot bitfield.
-local SLOT_NAMES = {
-    [0] = 'Main', [1] = 'Sub', [2] = 'Range', [3] = 'Ammo',
-    [4] = 'Head', [5] = 'Body', [6] = 'Hands', [7] = 'Legs',
-    [8] = 'Feet', [9] = 'Neck', [10] = 'Waist', [11] = 'L.Ear',
-    [12] = 'R.Ear', [13] = 'L.Ring', [14] = 'R.Ring', [15] = 'Back',
-}
-local function slots_from_bitfield(slots)
-    if type(slots) ~= 'number' or slots == 0 then return nil end
-    local names = {}
-    for bit = 0, 15 do
-        if bit32 and bit32.band(slots, bit32.lshift(1, bit)) ~= 0 then
-            names[#names + 1] = SLOT_NAMES[bit]
-        elseif not bit32 and math.floor(slots / (2 ^ bit)) % 2 == 1 then
-            names[#names + 1] = SLOT_NAMES[bit]
-        end
-    end
-    if #names == 0 then return nil end
-    return table.concat(names, ', ')
-end
-
---- Return details for a single item resource id.
--- Returns a table with id, name, category, stack plus rich metadata
--- (description, jobs, level, slots) sourced from the local Windower
--- `resources` library. No network calls are made here.
-function inventory.item_info(item_id)
-    local r = res.items[item_id]
-    if not r then
+--- Capacity and accessibility for one bag, without pushing every item.
+-- Returns { count, max, enabled }.
+function inventory.bag_info(bag_id)
+    local ok, info = pcall(windower.ffxi.get_bag_info, bag_id)
+    if ok and type(info) == 'table' then
         return {
-            id = item_id,
-            name = 'Unknown (' .. tostring(item_id) .. ')',
-            category = 'Unknown',
-            stack = 1,
-            description = nil,
+            count   = tonumber(info.count) or 0,
+            max     = tonumber(info.max) or 0,
+            enabled = info.enabled and true or false,
         }
     end
-
-    -- Description: Windower resources expose this as `description` on modern
-    -- builds. Some builds nest the English text; guard every access.
-    local description = r.description
-    if type(description) == 'table' then
-        description = description.en or description.english or description[1]
-    end
-    if type(description) ~= 'string' then description = nil end
-    if description then
-        -- DAT descriptions use \n line breaks; normalize to spaces for tooltips.
-        description = description:gsub('\r', ''):gsub('\n', ' '):gsub('%s+', ' ')
-    end
-
-    return {
-        id = item_id,
-        name = r.english or r.name or ('Item ' .. tostring(item_id)),
-        category = derive_category(r),
-        stack = r.stack or 1,
-        description = description,
-        item_level = r.item_level,
-        level = r.level,
-        jobs = stringify_set(r.jobs),
-        races = stringify_set(r.races),
-        slots = slots_from_bitfield(r.slots),
-        skill = r.skill,
-    }
+    return { count = 0, max = 0, enabled = false }
 end
 
---- Read the capacity (max slots) of a bag. Falls back to the definition max.
-function inventory.bag_capacity(bag_id)
+--- Is this bag usable right now?
+-- Inventory is always available. Other bags follow the game's own `enabled`
+-- flag, which already accounts for Mog House-only containers. A bag that
+-- reports items is treated as available even if the flag is false, because
+-- the flag is known to lag on higher wardrobes.
+function inventory.available(bag_id)
+    if bag_id == bags.INVENTORY_ID then return true end
+    local info = inventory.bag_info(bag_id)
+    return info.enabled or info.count > 0
+end
+
+--- Read one bag.
+-- Returns { id, key, name, max, used, free, items = { entry, ... },
+--           available = bool }
+-- Each entry: { slot, id, count, name, category, slot_name, stack,
+--               locked, status, equippable, furniture, rare, ex }
+function inventory.read(bag_id)
     local def = bags.get_by_id(bag_id)
-    local cap = nil
-    if windower.ffxi.get_bag_count then
-        -- get_bag_count returns { count, max } on some builds; guard it.
-        local ok, result = pcall(windower.ffxi.get_bag_count, bag_id)
-        if ok and type(result) == 'number' then
-            cap = result
-        end
-    end
-    return cap or (def and def.max_slots) or 80
-end
+    local info = inventory.bag_info(bag_id)
+    local out = {
+        id = bag_id,
+        key = def and def.key,
+        name = bags.name_for(bag_id),
+        max = info.max,
+        used = 0,
+        free = 0,
+        items = {},
+        available = inventory.available(bag_id),
+    }
 
---- Read all items currently in a bag.
--- Returns { items = { {slot, id, count, name, category, stack}, ... },
---           used = N, max = M }.
-function inventory.read_bag(bag_id)
-    local result = { items = {}, used = 0, max = inventory.bag_capacity(bag_id) }
-
-    local raw = windower.ffxi.get_items(bag_id)
-    if type(raw) ~= 'table' then
-        return result
+    local ok, raw = pcall(windower.ffxi.get_items, bag_id)
+    if not ok or type(raw) ~= 'table' then
+        return out
     end
 
-    -- The Windower items table for a bag has numeric slot keys plus metadata
-    -- fields like `count`, `max`, `enabled`. Use `max` when present.
-    if type(raw.max) == 'number' and raw.max > 0 then
-        result.max = raw.max
+    if tonumber(raw.max) and tonumber(raw.max) > 0 then
+        out.max = tonumber(raw.max)
     end
 
-    for slot = 1, (result.max or 80) do
-        local entry = raw[slot]
-        if type(entry) == 'table' and entry.id and entry.id ~= 0 then
-            local info = inventory.item_info(entry.id)
-            result.items[#result.items + 1] = {
+    for slot = 1, out.max do
+        local e = raw[slot]
+        if type(e) == 'table' and e.id and e.id ~= 0 then
+            local meta = items.get(e.id)
+            local status = tonumber(e.status) or 0
+            out.items[#out.items + 1] = {
                 slot = slot,
-                id = entry.id,
-                count = entry.count or 1,
-                name = info.name,
-                category = info.category,
-                stack = info.stack,
-                description = info.description,
-                item_level = info.item_level,
-                level = info.level,
-                jobs = info.jobs,
-                slots = info.slots,
+                id = e.id,
+                count = tonumber(e.count) or 1,
+                name = meta.name,
+                category = meta.category,
+                slot_name = meta.slot,
+                stack = meta.stack,
+                equippable = meta.equippable,
+                furniture = meta.furniture,
+                rare = meta.rare,
+                ex = meta.ex,
+                status = status,
+                locked = status ~= 0,
+                bag_id = bag_id,
+                bag_name = out.name,
             }
-            result.used = result.used + 1
+            out.used = out.used + 1
         end
     end
 
-    return result
+    out.free = math.max(0, out.max - out.used)
+    return out
 end
 
---- Build a full status snapshot for every enabled bag.
--- `enabled_bags` is a table keyed by bag key -> boolean.
--- Returns an ordered array of bag snapshots.
-function inventory.snapshot(enabled_bags)
-    enabled_bags = enabled_bags or {}
+--- Read every bag the player can currently use.
+-- `keys` optionally limits the read to specific bag keys.
+-- Returns an array of bag tables in canonical order.
+function inventory.snapshot(keys)
     local out = {}
     for _, b in ipairs(bags.list) do
-        if enabled_bags[b.key] then
-            local data = inventory.read_bag(b.id)
-            out[#out + 1] = {
-                id = b.id,
-                key = b.key,
-                name = b.name,
-                used = data.used,
-                max = data.max,
-                items = data.items,
-            }
+        if not keys or keys[b.key] then
+            local data = inventory.read(b.id)
+            if data.available then
+                out[#out + 1] = data
+            end
         end
     end
     return out
 end
 
---- Probe a single bag's live accessibility via the Windower API.
--- Returns { available = bool, enabled = bool, count = N, max = M }.
---
--- Detection strategy:
---   * windower.ffxi.get_bag_info(id) reports { count, enabled, max }. The
---     `enabled` flag is the game's own "is this container accessible right
---     now" signal (e.g. Safe/Locker are only enabled inside the Mog House).
---   * That flag is known to false-negative on higher wardrobes on some
---     clients (it derives from an old packet). So we ALSO treat a bag as
---     available whenever it currently holds items (count > 0) — you can't
---     have items in a container you don't have access to.
---   * Inventory (id 0) is always available.
-function inventory.detect_bag(bag_id)
-    local result = { available = false, enabled = false, count = 0, max = 0 }
-
-    if bag_id == bags.INVENTORY_ID then
-        result.available = true
-        result.enabled = true
-    end
-
-    if windower and windower.ffxi and windower.ffxi.get_bag_info then
-        local ok, info = pcall(windower.ffxi.get_bag_info, bag_id)
-        if ok and type(info) == 'table' then
-            result.enabled = info.enabled and true or false
-            result.count = tonumber(info.count) or 0
-            result.max = tonumber(info.max) or 0
-            if result.enabled or result.count > 0 then
-                result.available = true
-            end
-        end
-    end
-
-    -- Fallback: if get_bag_info is unavailable, infer from readable items.
-    if not result.available and bag_id ~= bags.INVENTORY_ID then
-        local ok, raw = pcall(windower.ffxi.get_items, bag_id)
-        if ok and type(raw) == 'table' then
-            if raw.enabled == true then
-                result.available = true
-                result.enabled = true
-            elseif type(raw.count) == 'number' and raw.count > 0 then
-                result.available = true
-            end
-        end
-    end
-
-    return result
-end
-
---- Detect accessibility for every known bag.
--- Returns a table keyed by bag key -> { available, enabled, count, max }.
-function inventory.detect_available()
-    local out = {}
-    for _, b in ipairs(bags.list) do
-        out[b.key] = inventory.detect_bag(b.id)
-    end
-    return out
-end
-
---- Find the first free slot in a bag, or nil if full.
-function inventory.first_free_slot(bag_id)
-    local raw = windower.ffxi.get_items(bag_id)
-    if type(raw) ~= 'table' then return nil end
-    local max = (type(raw.max) == 'number' and raw.max > 0) and raw.max or inventory.bag_capacity(bag_id)
-    for slot = 1, max do
-        local entry = raw[slot]
-        if not (type(entry) == 'table' and entry.id and entry.id ~= 0) then
-            return slot
-        end
+--- Find an item in a bag by slot, verifying the id matches.
+-- Returns the entry, or nil when the slot no longer holds that item.
+function inventory.at(bag_id, slot, expect_id)
+    local ok, raw = pcall(windower.ffxi.get_items, bag_id)
+    if not ok or type(raw) ~= 'table' then return nil end
+    local e = raw[slot]
+    if type(e) == 'table' and e.id and e.id ~= 0 then
+        if not expect_id or e.id == expect_id then return e end
     end
     return nil
 end
 
---- Count used / free slots for a bag.
-function inventory.usage(bag_id)
-    local data = inventory.read_bag(bag_id)
-    return data.used, data.max, (data.max - data.used)
+--- Find the slot of an item id in a bag, preferring a given stack count.
+-- Returns slot, entry.
+function inventory.find(bag_id, item_id, want_count)
+    local ok, raw = pcall(windower.ffxi.get_items, bag_id)
+    if not ok or type(raw) ~= 'table' then return nil end
+    local max = tonumber(raw.max) or 80
+    local fallback, fallback_entry
+    for slot = 1, max do
+        local e = raw[slot]
+        if type(e) == 'table' and e.id == item_id and (tonumber(e.status) or 0) == 0 then
+            if want_count and (tonumber(e.count) or 1) == want_count then
+                return slot, e
+            end
+            if not fallback then fallback, fallback_entry = slot, e end
+        end
+    end
+    return fallback, fallback_entry
+end
+
+--- Total quantity of an item id in a bag, summed across every stack.
+-- Used to verify a move: the destination total must rise by the moved count,
+-- which stays correct when stacks merge or a matching stack was already there.
+function inventory.total(bag_id, item_id)
+    local ok, raw = pcall(windower.ffxi.get_items, bag_id)
+    if not ok or type(raw) ~= 'table' then return 0 end
+    local max = tonumber(raw.max) or 80
+    local sum = 0
+    for slot = 1, max do
+        local e = raw[slot]
+        if type(e) == 'table' and e.id == item_id then
+            sum = sum + (tonumber(e.count) or 1)
+        end
+    end
+    return sum
+end
+
+--- Free slot count for a bag, read live.
+function inventory.free_slots(bag_id)
+    local info = inventory.bag_info(bag_id)
+    if info.max > 0 then
+        return math.max(0, info.max - info.count)
+    end
+    local data = inventory.read(bag_id)
+    return data.free
 end
 
 return inventory

@@ -1,198 +1,214 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoSort — FFXI Inventory Sorter</title>
-    <link rel="stylesheet" href="/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoSort</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <header class="app-header">
-        <div class="brand">
-            <span class="brand-mark">A</span>
-            <div>
-                <h1>AutoSort</h1>
-                <p class="tagline">FFXI inventory sorting for Windower&nbsp;4</p>
-            </div>
-        </div>
-        <div class="header-actions">
-            <span id="conn-status" class="pill pill-offline">Connecting…</span>
-            <button id="global-refresh" class="btn btn-ghost" title="Refresh all data">↻ Refresh</button>
-        </div>
-    </header>
 
-    <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="status" role="tab">Inventory Status</button>
-        <button class="tab" data-tab="settings" role="tab">Bag Settings</button>
-        <button class="tab" data-tab="rules" role="tab">Sort Rules</button>
-        <button class="tab" data-tab="preview" role="tab">Preview &amp; Execute</button>
-    </nav>
+<header>
+  <h1>AutoSort</h1>
+  <div class="who"><span id="character">—</span></div>
+  <div class="conn" id="conn">connecting…</div>
+</header>
 
-    <main>
-        <!-- ================= TAB 1: INVENTORY STATUS ================= -->
-        <section id="tab-status" class="tab-panel active">
-            <div class="panel-head">
-                <h2>Inventory Status</h2>
-                <button id="status-refresh" class="btn btn-ghost">↻ Refresh</button>
-            </div>
-            <p class="hint">Live contents of every <strong>enabled</strong> bag. Enable more bags in the Bag Settings tab.</p>
-            <div id="status-list" class="bag-list">
-                <div class="empty">Loading…</div>
-            </div>
-        </section>
+<nav class="tabs">
+  <button class="tab active" data-tab="status">Inventory</button>
+  <button class="tab" data-tab="layout">Layout</button>
+  <button class="tab" data-tab="rules">Rules</button>
+  <button class="tab" data-tab="run">Preview &amp; Sort</button>
+  <button class="tab" data-tab="options">Options</button>
+</nav>
 
-        <!-- ================= TAB 2: BAG SETTINGS ================= -->
-        <section id="tab-settings" class="tab-panel">
-            <div class="panel-head">
-                <h2>Bag Settings</h2>
-                <div class="head-actions">
-                    <button id="settings-detect" class="btn btn-ghost" title="Ask the game which bags you can access right now and auto-enable any new ones">🔍 Auto-detect bags</button>
-                    <button id="settings-save" class="btn btn-primary">Save Bag Settings</button>
-                </div>
-            </div>
-            <p class="hint">
-                Toggle the storage containers you actually own. AutoSort auto-detects which bags
-                you can access and enables new ones for you the first time it sees them — after that,
-                your manual on/off choice is always respected. A <span class="detect-badge detected">✓ Detected</span>
-                badge means the game can see that bag right now; <span class="detect-badge unavailable">Not accessible</span>
-                usually means a Mog House bag while you're out in the field. Inventory is always on — it is the
-                required intermediate for every move.
-            </p>
-            <div class="field-inline">
-                <label for="move-delay">Delay between moves (seconds)</label>
-                <input type="number" id="move-delay" min="0.3" max="5" step="0.1" value="0.7">
-                <span class="hint-sm">Higher is safer against server rejections.</span>
-            </div>
-            <div class="field-inline">
-                <label for="mule-bag">Mule Bag (items for secondary characters)</label>
-                <select id="mule-bag">
-                    <option value="">None — no mule designation</option>
-                </select>
-                <span class="hint-sm">Choose a bag to gather items destined for alts. Items going here will be marked <strong>📦 For Mule</strong> in previews.</span>
-            </div>
-            <div id="bag-toggles" class="toggle-grid">
-                <div class="empty">Loading…</div>
-            </div>
-        </section>
+<main>
 
-        <!-- ================= TAB 3: SORT RULES ================= -->
-        <section id="tab-rules" class="tab-panel">
-            <div class="panel-head">
-                <h2>Sort Rules</h2>
-                <button id="rules-save" class="btn btn-primary">Save Rules</button>
-            </div>
-            <p class="hint">
-                Rules are checked <strong>top to bottom — first match wins</strong>. Pick a
-                <em>category</em> (slot type or item type) and optionally a <em>name filter</em>
-                (supports <code>*</code> wildcards, e.g. <code>*Sword*</code>). Both conditions
-                must pass. Leave the name filter blank to match all items in the category.
-                Items with no matching rule are left where they are.
-            </p>
+  <!-- ------------------------------------------------ Inventory -->
+  <section id="tab-status" class="panel active">
+    <div class="toolbar">
+      <input type="search" id="item-filter" placeholder="Filter items…">
+      <label class="check"><input type="checkbox" id="hide-empty" checked> Hide empty bags</label>
+      <button class="btn" id="refresh-status">Refresh</button>
+    </div>
+    <p class="hint">Click any item to build a rule from it.</p>
+    <div id="bag-list"></div>
+  </section>
 
-            <div class="rule-add card">
-                <div class="rule-add-row">
-                    <select id="new-rule-category">
-                        <option value="ALL">ALL (any item)</option>
-                        <optgroup label="Weapons">
-                            <option value="Main">Main Hand</option>
-                            <option value="Sub">Sub / Shield</option>
-                            <option value="Ranged">Ranged</option>
-                            <option value="Ammo">Ammo</option>
-                        </optgroup>
-                        <optgroup label="Armor">
-                            <option value="Head">Head</option>
-                            <option value="Body">Body</option>
-                            <option value="Hands">Hands</option>
-                            <option value="Legs">Legs</option>
-                            <option value="Feet">Feet</option>
-                            <option value="Neck">Neck</option>
-                            <option value="Waist">Waist</option>
-                            <option value="Earring">Earring</option>
-                            <option value="Ring">Ring</option>
-                            <option value="Back">Back</option>
-                        </optgroup>
-                        <optgroup label="Non-Equipment">
-                            <option value="Food">Food</option>
-                            <option value="Usable">Usable</option>
-                            <option value="Crystal">Crystal</option>
-                            <option value="Currency">Currency</option>
-                            <option value="General">General</option>
-                        </optgroup>
-                    </select>
-                    <input type="text" id="new-rule-wildcard" placeholder="Name filter, e.g. *Sword* (blank = match all)">
-                    <span class="arrow">→</span>
-                    <select id="new-rule-target"></select>
-                    <button id="add-rule" class="btn btn-primary">Add Rule</button>
-                </div>
-            </div>
+  <!-- ------------------------------------------------ Layout -->
+  <section id="tab-layout" class="panel">
+    <div class="toolbar">
+      <div class="seg" id="lay-view" role="group" aria-label="View">
+        <button data-view="current" class="on">Current</button>
+        <button data-view="after">After sort</button>
+      </div>
+      <div class="seg" id="lay-mode" role="group" aria-label="What a drop creates a rule for">
+        <span class="seg-label">A drop makes a rule for</span>
+        <button data-mode="item" class="on" title="Just this item">the item</button>
+        <button data-mode="category" title="Every item in its category (or hold Shift)">its category</button>
+        <button data-mode="slot" title="Every item for its equipment slot (or hold Alt)">its slot</button>
+      </div>
+      <input type="search" id="lay-filter" placeholder="Filter items…">
+      <label class="check"><input type="checkbox" id="lay-hide-empty"> Hide empty bags</label>
+      <button class="btn" id="lay-refresh">Refresh</button>
+      <span class="grow"></span>
+      <span class="right-actions">
+        <span class="dirty hidden" id="lay-dirty">Unsaved changes</span>
+        <button class="btn" id="lay-revert" disabled>Revert</button>
+        <button class="btn primary" id="lay-save" disabled>Save rules</button>
+      </span>
+    </div>
 
-            <table class="rules-table">
-                <thead>
-                    <tr>
-                        <th style="width:40px">#</th>
-                        <th style="width:130px">Category</th>
-                        <th>Wildcard</th>
-                        <th style="width:220px">Target Bag</th>
-                        <th style="width:110px"></th>
-                    </tr>
-                </thead>
-                <tbody id="rules-body">
-                    <tr><td colspan="5" class="empty">No rules yet. Add one above.</td></tr>
-                </tbody>
-            </table>
-        </section>
+    <p class="hint">
+      <strong>Drag an item onto a bag</strong> to make a rule that keeps it there. Click items to
+      select several, then drag any of them (or use <em>Move here</em>). Press <kbd>Shift</kbd> while
+      dragging to cover the item's whole category, <kbd>Alt</kbd> for its slot (or use the switch above). Nothing is saved or
+      moved until you say so: <em>After sort</em> shows the real result of your unsaved rules.
+    </p>
 
-        <!-- ================= TAB 4: PREVIEW & EXECUTE ================= -->
-        <section id="tab-preview" class="tab-panel">
-            <div class="panel-head">
-                <h2>Preview &amp; Execute</h2>
-                <div>
-                    <button id="generate-preview" class="btn btn-primary">Generate Preview</button>
-                    <button id="execute-sort" class="btn btn-danger" disabled>Execute Sort</button>
-                    <button id="stop-sort" class="btn btn-ghost hidden">Stop</button>
-                </div>
-            </div>
+    <div id="lay-summary" class="summary"></div>
+    <div class="lay-bar"><span id="lay-selcount" class="muted"></span>
+      <button class="mini-link hidden" id="lay-clear">Clear selection</button>
+      <span class="grow"></span><span class="muted" id="lay-missing"></span></div>
+    <div id="lay-grid" class="lay-grid"></div>
+  </section>
 
-            <div id="preview-warnings" class="warnings hidden"></div>
+  <!-- ------------------------------------------------ Rules -->
+  <section id="tab-rules" class="panel">
+    <div class="toolbar">
+      <button class="btn primary" id="add-rule">Add rule</button>
+      <button class="btn" id="save-rules">Save rules</button>
+      <button class="btn" id="revert-rules">Revert</button>
+      <span class="grow"></span>
+      <span class="muted" id="rule-file"></span>
+    </div>
 
-            <h3 class="section-label">Planned Moves <span id="move-count" class="count">0</span></h3>
-            <table class="moves-table">
-                <thead>
-                    <tr>
-                        <th>Item</th>
-                        <th style="width:60px">Qty</th>
-                        <th style="width:180px">From</th>
-                        <th style="width:40px"></th>
-                        <th style="width:180px">To</th>
-                        <th style="width:70px">Hops</th>
-                    </tr>
-                </thead>
-                <tbody id="moves-body">
-                    <tr><td colspan="6" class="empty">Generate a preview to see planned moves.</td></tr>
-                </tbody>
-            </table>
+    <div class="card" id="defaults-card">
+      <div class="card-head">
+        <label class="check"><input type="checkbox" id="def-enabled"> <strong>Built-in defaults</strong></label>
+        <span class="muted">A sensible layout based on the bags you have. Your rules below always win.</span>
+        <span class="grow"></span>
+        <label class="muted">Keep <select id="def-free"></select> Inventory slots free</label>
+      </div>
+      <div id="def-groups"></div>
+    </div>
 
-            <h3 class="section-label">Capacity Impact</h3>
-            <div id="capacity-list" class="capacity-list">
-                <div class="empty">No preview generated yet.</div>
-            </div>
+    <h3>Your rules <span class="muted">(checked first, override the defaults)</span>
+      <span class="dirty hidden" id="rules-dirty">Unsaved changes</span></h3>
 
-            <h3 class="section-label">Unmatched Items <span id="unmatched-count" class="count">0</span></h3>
-            <div id="unmatched-list" class="unmatched-list">
-                <div class="empty">—</div>
-            </div>
+    <p class="hint">
+      Rules run top to bottom and the <strong>first match wins</strong>, so put
+      specific rules above broad ones. Leave the name blank to match on category
+      alone, or the category on <em>Any</em> to match on name alone.
+      Send an item to <strong>Keep in place</strong> to pin it where it is.
+    </p>
 
-            <div id="exec-progress" class="exec-progress hidden">
-                <h3 class="section-label">Execution Progress</h3>
-                <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
-                <div id="progress-text" class="progress-text">0 / 0</div>
-                <pre id="progress-log" class="progress-log"></pre>
-            </div>
-        </section>
-    </main>
+    <div class="rule-head">
+      <span>Order</span><span>Item name (* wildcard)</span>
+      <span>Category / slot</span><span>Destination</span><span></span>
+    </div>
+    <div id="rule-list"></div>
+    <p class="empty" id="rule-empty">No rules yet. Add one, or click an item on the Inventory tab.</p>
+  </section>
 
-    <div id="toast" class="toast"></div>
+  <!-- ------------------------------------------------ Preview & Sort -->
+  <section id="tab-run" class="panel">
+    <div class="toolbar">
+      <label>Source:
+        <select id="preview-bag"><option value="">All bags</option></select>
+      </label>
+      <button class="btn primary" id="do-preview">Generate preview</button>
+      <button class="btn go" id="do-execute" disabled>Execute sort</button>
+      <button class="btn danger" id="do-stop" disabled>Stop</button>
+    </div>
 
-    <script src="/app.js"></script>
+    <div id="run-dirty" class="notice hidden">
+      You have unsaved rule changes. Preview and Execute use the <strong>saved</strong> rules,
+      so save first (Layout or Rules tab) to include your changes.
+    </div>
+
+    <div id="preview-summary" class="summary"></div>
+
+    <div class="cols">
+      <div>
+        <h3>Planned moves <span class="pill" id="move-count">0</span></h3>
+        <div id="move-list" class="list"></div>
+      </div>
+      <div>
+        <h3>Capacity impact</h3>
+        <div id="capacity-list" class="list"></div>
+        <h3>Not moving <span class="pill" id="issue-count">0</span></h3>
+        <div id="issue-list" class="list"></div>
+      </div>
+    </div>
+
+    <div id="progress-wrap" class="hidden">
+      <h3>Progress</h3>
+      <div class="bar"><div id="progress-bar"></div></div>
+      <div id="progress-text" class="muted"></div>
+      <pre id="progress-log"></pre>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------ Options -->
+  <section id="tab-options" class="panel">
+    <div class="opt">
+      <label for="opt-delay">Delay between moves (seconds)</label>
+      <input type="number" id="opt-delay" min="0.3" max="5" step="0.1">
+      <p class="muted">Lower is faster but more likely to be rejected by the server. 0.8 is safe.</p>
+    </div>
+
+    <div class="opt">
+      <label for="opt-keepfree">Inventory slots to leave empty</label>
+      <input type="number" id="opt-keepfree" min="0" max="40" step="1">
+      <p class="muted">AutoSort will not fill these. It still needs at least one free slot to move items between other bags.</p>
+    </div>
+
+    <div class="opt">
+      <label class="check"><input type="checkbox" id="opt-gear"> Protect gear used by GearSwap</label>
+      <p class="muted">Scans your GearSwap files and never moves anything they reference. <span id="gear-count"></span></p>
+    </div>
+
+    <div class="opt">
+      <label for="opt-protect">Never move these items (one per line, * wildcard)</label>
+      <textarea id="opt-protect" rows="6" placeholder="Warp Ring&#10;Emperor Band"></textarea>
+    </div>
+
+    <div class="opt">
+      <label class="check"><input type="checkbox" id="opt-icons" checked> Show item icons</label>
+      <p class="muted">Icons load by item ID from ffxiah.com. Turn this off to avoid any outside requests.</p>
+    </div>
+
+    <button class="btn primary" id="save-options">Save options</button>
+  </section>
+
+</main>
+
+<!-- Rule builder, opened by clicking an item -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <h3>New rule for <span id="modal-item"></span></h3>
+    <label>Match
+      <select id="modal-kind">
+        <option value="exact">this exact item</option>
+        <option value="category">every item in this category</option>
+        <option value="slot">every item for this slot</option>
+      </select>
+    </label>
+    <label>Send to
+      <select id="modal-dest"></select>
+    </label>
+    <div class="modal-actions">
+      <button class="btn" id="modal-cancel">Cancel</button>
+      <button class="btn primary" id="modal-add">Add rule</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="rulegen.js"></script>
+<script src="app.js"></script>
+<script src="layout.js"></script>
 </body>
 </html>

@@ -1,636 +1,582 @@
-/* AutoSort Web UI — frontend logic (vanilla JS, no dependencies).
- *
- * Talks to the Lua HTTP server via the /api/* JSON endpoints. All state is
- * kept in the `state` object; each tab re-renders from that state. Settings
- * (enabled bags + rules) are edited locally and pushed with an explicit Save.
- */
+/*
+    app.js — AutoSort Web UI.
+
+    Talks to the add-on over /api/*. Every request carries the session token
+    that the add-on put in this page's URL; without it the server replies 403.
+
+    All rendering uses textContent or escaped interpolation, so an item name
+    can never inject markup.
+*/
 
 'use strict';
 
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+
 const state = {
-    settings: { enabled_bags: {}, rules: [], move_delay: 0.7, port: 9898 },
-    catalog: [],        // [{key,name,id,note}]
-    categories: [],     // ["Weapon","Armor",...]
-    status: null,       // last /api/status response
-    plan: null,         // last preview plan
+    bags: [],          // live bag contents
+    catalog: [],       // every bag, available or not
+    rules: [],         // working copy, saved on demand
+    savedRules: '[]',  // serialized last-saved rules, for Revert
+    options: {},
+    categories: [],
+    slots: [],
+    showIcons: localStorage.getItem('autosort.icons') !== 'false',
+    pending: null,     // item awaiting the rule-builder modal
     progressTimer: null,
+    defaultsInfo: null,   // built-in default groups as described by the add-on
+    savedDefaults: '{}',  // serialized last-saved defaults, for Revert and dirty checks
 };
 
-/* ------------------------------------------------------------------ */
-/* Small helpers                                                       */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ utils */
 
-const $  = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-
-function el(tag, attrs = {}, ...children) {
-    const node = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs)) {
-        if (k === 'class') node.className = v;
-        else if (k === 'html') node.innerHTML = v;
-        else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
-        else if (v !== null && v !== undefined) node.setAttribute(k, v);
-    }
-    for (const c of children) {
-        if (c == null) continue;
-        node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-    }
-    return node;
-}
+const $ = (id) => document.getElementById(id);
 
 function esc(s) {
-    return String(s).replace(/[&<>"']/g, m => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]
-    ));
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
 }
 
-let toastTimer = null;
-function toast(msg, kind = '') {
-    const t = $('#toast');
+let toastTimer;
+function toast(msg, kind) {
+    const t = $('toast');
     t.textContent = msg;
-    t.className = 'toast show ' + kind;
+    t.className = 'toast show' + (kind ? ' ' + kind : '');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.className = 'toast'; }, 2600);
+    // Errors and warnings stay up long enough to read and copy.
+    const ms = kind === 'bad' ? 12000 : kind === 'warn' ? 7000 : 3200;
+    toastTimer = setTimeout(() => { t.className = 'toast'; }, ms);
 }
 
-async function api(path, method = 'GET', body = null) {
-    const opts = { method, headers: {} };
-    if (body !== null) {
-        opts.headers['Content-Type'] = 'application/json';
-        opts.body = JSON.stringify(body);
-    }
+async function call(path, options) {
+    const opts = Object.assign({ headers: {} }, options || {});
+    opts.headers['X-AutoSort-Token'] = TOKEN;
+    if (opts.body) opts.headers['Content-Type'] = 'application/json';
+
     const res = await fetch('/api/' + path, opts);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
-}
-
-function setConn(online) {
-    const pill = $('#conn-status');
-    if (online) { pill.textContent = 'Connected'; pill.className = 'pill pill-online'; }
-    else { pill.textContent = 'Disconnected'; pill.className = 'pill pill-offline'; }
-}
-
-function nameForBag(key) {
-    const b = state.catalog.find(c => c.key === key);
-    return b ? b.name : key;
-}
-
-/* ------------------------------------------------------------------ */
-/* Item icons + description tooltip                                    */
-/* ------------------------------------------------------------------ */
-
-// Build the icon URL for an item id from the configured base URL.
-// Returns null when icons are disabled or no base URL / id is available.
-function iconUrl(id) {
-    if (!state.settings || state.settings.show_icons === false) return null;
-    const base = state.settings.icon_base_url;
-    if (!base || id == null) return null;
-    return base + id + '.png';
-}
-
-// Create an icon element for an item, with a graceful fallback placeholder
-// (the item's first letter) if the CDN image is missing or icons are off.
-function makeIcon(item) {
-    const wrap = el('span', { class: 'item-icon' });
-    const url = iconUrl(item.id);
-    const placeholder = () => {
-        wrap.classList.add('item-icon-ph');
-        wrap.textContent = (item.name || '?').charAt(0).toUpperCase();
-    };
-    if (!url) { placeholder(); return wrap; }
-    const img = el('img', { src: url, alt: item.name || '', loading: 'lazy' });
-    img.addEventListener('error', () => { wrap.innerHTML = ''; placeholder(); });
-    wrap.appendChild(img);
-    return wrap;
-}
-
-// Shared floating tooltip element (created once).
-let _tip = null;
-function ensureTip() {
-    if (!_tip) {
-        _tip = el('div', { class: 'item-tip hidden' });
-        document.body.appendChild(_tip);
+    const data = await res.json().catch(() => ({ ok: false, error: 'bad response' }));
+    if (!res.ok || data.ok === false) {
+        throw new Error(data.error || ('HTTP ' + res.status));
     }
-    return _tip;
+    return data;
 }
 
-// Build the tooltip HTML for an item from its metadata.
-function tipHtml(item) {
-    const rows = [];
-    rows.push(`<div class="tip-head">${esc(item.name || 'Unknown')}</div>`);
-    const meta = [];
-    if (item.category) meta.push(esc(item.category));
-    if (item.slots) meta.push(esc(item.slots));
-    if (item.level) meta.push('Lv.' + esc(item.level));
-    if (item.item_level) meta.push('iLv.' + esc(item.item_level));
-    if (meta.length) rows.push(`<div class="tip-meta">${meta.join(' · ')}</div>`);
-    if (item.jobs) rows.push(`<div class="tip-jobs">${esc(item.jobs)}</div>`);
-    if (item.description) rows.push(`<div class="tip-desc">${esc(item.description)}</div>`);
-    else rows.push(`<div class="tip-desc tip-dim">No description available.</div>`);
-    if (item.id != null) rows.push(`<div class="tip-id">Item ID: ${esc(item.id)}</div>`);
-    return rows.join('');
+function iconFor(id) {
+    if (!state.showIcons || !id) return '';
+    return `<img class="icon" loading="lazy" alt=""
+        src="https://static.ffxiah.com/images/icon/${Number(id)}.png"
+        onerror="this.style.visibility='hidden'">`;
 }
 
-// Wire hover/focus behaviour on a row element to show the item tooltip.
-function attachTip(node, item) {
-    const show = (e) => {
-        const tip = ensureTip();
-        tip.innerHTML = tipHtml(item);
-        tip.classList.remove('hidden');
-        moveTip(e);
-    };
-    const moveTip = (e) => {
-        const tip = ensureTip();
-        const pad = 14;
-        let x = e.clientX + pad, y = e.clientY + pad;
-        const r = tip.getBoundingClientRect();
-        if (x + r.width > window.innerWidth) x = e.clientX - r.width - pad;
-        if (y + r.height > window.innerHeight) y = e.clientY - r.height - pad;
-        tip.style.left = Math.max(4, x) + 'px';
-        tip.style.top = Math.max(4, y) + 'px';
-    };
-    const hide = () => { ensureTip().classList.add('hidden'); };
-    node.addEventListener('mouseenter', show);
-    node.addEventListener('mousemove', moveTip);
-    node.addEventListener('mouseleave', hide);
-}
+/* ------------------------------------------------------------------- tabs */
 
-/* ------------------------------------------------------------------ */
-/* Tabs                                                                */
-/* ------------------------------------------------------------------ */
-
-function initTabs() {
-    $$('.tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            $$('.tab').forEach(t => t.classList.remove('active'));
-            $$('.tab-panel').forEach(p => p.classList.remove('active'));
-            tab.classList.add('active');
-            $('#tab-' + tab.dataset.tab).classList.add('active');
-            if (tab.dataset.tab === 'status') loadStatus();
-        });
+document.querySelectorAll('.tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach((b) => b.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
+        btn.classList.add('active');
+        $('tab-' + btn.dataset.tab).classList.add('active');
+        if (btn.dataset.tab === 'status') loadStatus();
+        if (btn.dataset.tab === 'layout' && window.Layout) window.Layout.onShow();
+        if (btn.dataset.tab === 'run') updateDirtyUi();
     });
-}
+});
 
-/* ------------------------------------------------------------------ */
-/* Tab 1: Inventory Status                                             */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- inventory */
 
 async function loadStatus() {
-    const list = $('#status-list');
-    list.innerHTML = '<div class="empty">Loading…</div>';
     try {
-        const data = await api('status');
-        setConn(true);
-        state.status = data;
-        renderStatus(data.bags || []);
-        // The status catalog carries live slot counts + availability badges,
-        // so re-render the Bag Settings toggles now that we have richer data.
-        if (data.catalog) renderBagToggles();
-    } catch (e) {
-        setConn(false);
-        list.innerHTML = '<div class="empty">Could not reach the add-on. Is AutoSort loaded in-game?</div>';
+        const data = await call('status');
+        state.bags = data.bags || [];
+        $('character').textContent = data.character || '—';
+        $('conn').textContent = 'connected';
+        $('conn').className = 'conn ok';
+        renderBags();
+    } catch (err) {
+        $('conn').textContent = 'disconnected';
+        $('conn').className = 'conn bad';
+        $('bag-list').innerHTML =
+            `<p class="empty">Could not reach the add-on: ${esc(err.message)}</p>`;
     }
 }
 
-function pctClass(pct) {
-    if (pct > 100) return 'over';
-    if (pct >= 90) return 'warn';
-    return '';
+function renderBags() {
+    const filter = $('item-filter').value.trim().toLowerCase();
+    const hideEmpty = $('hide-empty').checked;
+    const out = [];
+
+    state.bags.forEach((bag) => {
+        const matches = bag.items.filter(
+            (it) => !filter || it.name.toLowerCase().includes(filter));
+        if (hideEmpty && matches.length === 0) return;
+
+        const pct = bag.max ? Math.round((bag.used / bag.max) * 100) : 0;
+        const rows = matches.map((it) => {
+            const tags = [];
+            if (it.locked) tags.push('<span class="tag lock">equipped</span>');
+            if (it.rare) tags.push('<span class="tag">Rare</span>');
+            if (it.ex) tags.push('<span class="tag">Ex</span>');
+            return `<li class="item${it.locked ? ' locked' : ''}"
+                 data-id="${Number(it.id)}" data-name="${esc(it.name)}"
+                 data-category="${esc(it.category)}" data-slot="${esc(it.slot_name || '')}">
+                ${iconFor(it.id)}
+                <span class="nm">${esc(it.name)}</span>
+                ${it.count > 1 ? `<span class="ct">x${Number(it.count)}</span>` : ''}
+                <span class="cat">${esc(it.slot_name || it.category)}</span>
+                ${tags.join('')}
+            </li>`;
+        }).join('');
+
+        out.push(`<div class="bag">
+            <div class="bag-head">
+                <strong>${esc(bag.name)}</strong>
+                <span class="muted">${bag.used}/${bag.max}</span>
+                <div class="meter"><div style="width:${pct}%"></div></div>
+            </div>
+            <ul class="items">${rows || '<li class="empty">No matching items</li>'}</ul>
+        </div>`);
+    });
+
+    $('bag-list').innerHTML = out.join('') ||
+        '<p class="empty">No accessible bags. Are you logged in?</p>';
+
+    document.querySelectorAll('.item:not(.locked)').forEach((el) => {
+        el.addEventListener('click', () => openRuleBuilder(el.dataset));
+    });
 }
 
-function renderStatus(bags) {
-    const list = $('#status-list');
-    list.innerHTML = '';
-    if (!bags.length) {
-        list.appendChild(el('div', { class: 'empty' }, 'No enabled bags. Enable bags in the Bag Settings tab.'));
-        return;
-    }
+$('item-filter').addEventListener('input', renderBags);
+$('hide-empty').addEventListener('change', renderBags);
+$('refresh-status').addEventListener('click', loadStatus);
 
-    bags.forEach(bag => {
-        const pct = Math.floor((bag.used / Math.max(1, bag.max)) * 100);
-        const head = el('div', { class: 'bag-card-head' },
-            el('span', { class: 'bag-name' }, bag.name),
-            el('span', { class: 'bag-slots' }, `${bag.used} / ${bag.max}`),
-            el('div', { class: 'progress-bar' },
-                el('div', { class: 'progress-fill ' + pctClass(pct), style: `width:${Math.min(100, pct)}%` })),
-            el('span', { class: 'bag-chevron' }, '▶'),
-        );
-        const itemsWrap = el('div', { class: 'bag-items' });
-        if (!bag.items.length) {
-            itemsWrap.appendChild(el('div', { class: 'empty' }, 'Empty'));
-        } else {
-            bag.items.forEach(it => {
-                const row = el('div', { class: 'item-row' },
-                    makeIcon(it),
-                    el('span', { class: 'item-name' }, it.name),
-                    el('span', { class: 'item-cat' }, it.category),
-                    el('span', { class: 'item-qty' }, '×' + it.count),
-                );
-                attachTip(row, it);
-                itemsWrap.appendChild(row);
+/* ------------------------------------------------------- rule builder modal */
+
+function destOptions(selected) {
+    const opts = ['<option value="keep">Keep in place</option>'];
+    state.catalog.forEach((b) => {
+        const label = b.name + (b.available ? '' : ' (not accessible)')
+            + (b.accepts === 'equipment' ? ' — gear only'
+                : b.accepts === 'furniture' ? ' — furniture only' : '');
+        opts.push(`<option value="${esc(b.key)}"${b.key === selected ? ' selected' : ''}>${esc(label)}</option>`);
+    });
+    return opts.join('');
+}
+
+function openRuleBuilder(data) {
+    state.pending = data;
+    $('modal-item').textContent = data.name;
+
+    const kind = $('modal-kind');
+    kind.innerHTML =
+        `<option value="exact">this exact item (${esc(data.name)})</option>
+         <option value="category">every ${esc(data.category)} item</option>` +
+        (data.slot ? `<option value="slot">every ${esc(data.slot)} item</option>` : '');
+
+    $('modal-dest').innerHTML = destOptions();
+    $('modal').classList.remove('hidden');
+}
+
+$('modal-cancel').addEventListener('click', () => {
+    $('modal').classList.add('hidden');
+    state.pending = null;
+});
+
+$('modal-add').addEventListener('click', () => {
+    const d = state.pending;
+    if (!d) return;
+    const kind = $('modal-kind').value;
+    const rule = { to: $('modal-dest').value };
+
+    if (kind === 'exact') rule.match = d.name;
+    else if (kind === 'category') rule.category = d.category;
+    else rule.category = d.slot;
+
+    // Specific rules are useless below a broad one, so exact-name rules go to
+    // the top and category rules to the bottom.
+    if (kind === 'exact') state.rules.unshift(rule);
+    else state.rules.push(rule);
+
+    $('modal').classList.add('hidden');
+    state.pending = null;
+    renderRules();
+    toast('Rule added. Remember to save.', 'warn');
+});
+
+/* ------------------------------------------------------------------- rules */
+
+function renderRulesInner() {
+    const list = $('rule-list');
+    $('rule-empty').style.display = state.rules.length ? 'none' : 'block';
+
+    list.innerHTML = state.rules.map((r, i) => {
+        const catOpts = ['<option value="">Any</option>']
+            .concat(state.categories.map((c) =>
+                `<option value="${esc(c)}"${r.category === c ? ' selected' : ''}>${esc(c)}</option>`))
+            .concat(['<option disabled>— equipment slots —</option>'])
+            .concat(state.slots.map((s) =>
+                `<option value="${esc(s)}"${r.category === s ? ' selected' : ''}>${esc(s)}</option>`))
+            .join('');
+
+        return `<div class="rule${isBlank(r) ? ' blank' : ''}" data-i="${i}"
+            ${isBlank(r) ? 'title="Blank rules are ignored. Give it a name or a category."' : ''}>
+            <div class="ord">
+                <button class="mini" data-act="up" ${i === 0 ? 'disabled' : ''}>▲</button>
+                <span>${i + 1}</span>
+                <button class="mini" data-act="down" ${i === state.rules.length - 1 ? 'disabled' : ''}>▼</button>
+            </div>
+            <input type="text" data-field="match" placeholder="e.g. *Crystal"
+                   value="${esc(r.match || '')}">
+            <select data-field="category">${catOpts}</select>
+            <select data-field="to">${destOptions(r.to)}</select>
+            <button class="mini del" data-act="del">✕</button>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.rule').forEach((row) => {
+        const i = Number(row.dataset.i);
+        row.querySelectorAll('[data-field]').forEach((input) => {
+            input.addEventListener('change', () => {
+                const v = input.value;
+                const f = input.dataset.field;
+                state.rules[i][f] = v === '' ? undefined : v;
             });
-        }
-        const card = el('div', { class: 'bag-card' }, head, itemsWrap);
-        head.addEventListener('click', () => card.classList.toggle('open'));
-        list.appendChild(card);
-    });
-}
-
-/* ------------------------------------------------------------------ */
-/* Tab 2: Bag Settings                                                 */
-/* ------------------------------------------------------------------ */
-
-function renderBagToggles() {
-    const wrap = $('#bag-toggles');
-    wrap.innerHTML = '';
-    // Prefer live catalog from /api/status (has used/max); fall back to settings catalog.
-    const catalog = (state.status && state.status.catalog) || state.catalog.map(c => ({
-        ...c, enabled: !!state.settings.enabled_bags[c.key], used: 0, max: 80,
-    }));
-
-    catalog.forEach(b => {
-        const isInv = b.key === 'inventory';
-        const enabled = !!state.settings.enabled_bags[b.key] || isInv;
-        const input = el('input', { type: 'checkbox' });
-        input.checked = enabled;
-        if (isInv) input.disabled = true;
-        input.addEventListener('change', () => {
-            state.settings.enabled_bags[b.key] = input.checked;
-            card.classList.toggle('disabled', !input.checked);
-            populateMuleBagDropdown(); // update mule bag options when bags change
         });
-
-        // Detection badge: reflects what the game reports as accessible right now.
-        // Inventory is always accessible. `available` comes from /api/status.
-        const available = isInv || b.available === true;
-        const badge = el('span', {
-            class: 'detect-badge ' + (available ? 'detected' : 'unavailable'),
-            title: available
-                ? 'AutoSort can see this bag right now.'
-                : 'Not accessible right now (e.g. a Mog House bag while you are out in the field). You can still enable it — it just won\'t be sorted until you have access.',
-        }, available ? '✓ Detected' : 'Not accessible');
-
-        const name = el('div', { class: 'name' }, b.name, badge);
-
-        const card = el('div', { class: 'toggle-card' + (enabled ? '' : ' disabled') },
-            el('label', { class: 'switch' }, input, el('span', { class: 'slider' })),
-            el('div', { class: 'toggle-info' },
-                name,
-                el('div', { class: 'slots' }, `Slots: ${b.used ?? 0} / ${b.max ?? 80}`),
-                el('div', { class: 'note' }, b.note || ''),
-            ),
-        );
-        wrap.appendChild(card);
+        row.querySelectorAll('[data-act]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const act = btn.dataset.act;
+                if (act === 'del') state.rules.splice(i, 1);
+                else if (act === 'up' && i > 0) {
+                    [state.rules[i - 1], state.rules[i]] = [state.rules[i], state.rules[i - 1]];
+                } else if (act === 'down' && i < state.rules.length - 1) {
+                    [state.rules[i + 1], state.rules[i]] = [state.rules[i], state.rules[i + 1]];
+                }
+                renderRules();
+            });
+        });
     });
 }
 
-function populateMuleBagDropdown() {
-    const select = $('#mule-bag');
-    const currentValue = select.value;
-    select.innerHTML = '<option value="">None — no mule designation</option>';
-    
-    const catalog = (state.status && state.status.catalog) || state.catalog;
-    catalog.forEach(b => {
-        if (state.settings.enabled_bags[b.key]) {
-            const opt = el('option', { value: b.key }, b.name);
-            select.appendChild(opt);
-        }
+$('add-rule').addEventListener('click', () => {
+    state.rules.push({ match: '', category: '', to: 'satchel' });
+    renderRules();
+});
+
+/* --------------------------------------------- working copy vs saved copy */
+
+/* A rule with no name and no category would match EVERY item and override all
+   the built-in defaults, so an empty row is never saved or previewed. */
+function isBlank(r) { return !r.match && !r.category; }
+
+function cleanRules() {
+    return state.rules
+        .filter((r) => r.to && !isBlank(r))
+        .map((r) => ({
+            match: r.match || undefined,
+            category: r.category || undefined,
+            to: r.to,
+        }));
+}
+window.cleanRules = cleanRules;
+
+/* Compare rules and defaults by VALUE. The add-on's JSON has no stable key
+   order (Lua tables are unordered), so comparing raw JSON text reports
+   "unsaved changes" for rules that are actually identical. */
+function canonRules(list) {
+    return JSON.stringify(list.filter((r) => !isBlank(r))
+        .map((r) => [r.match || '', r.category || '', r.to || '']));
+}
+function canonDefaults(d) {
+    const o = {};
+    Object.keys(d || {}).sort().forEach((k) => { o[k] = d[k]; });
+    return JSON.stringify(o);
+}
+
+function isDirty() {
+    return canonRules(cleanRules()) !== canonRules(JSON.parse(state.savedRules)) ||
+           canonDefaults(state.options.defaults) !== canonDefaults(JSON.parse(state.savedDefaults));
+}
+
+/* Everything that shows "you have unsaved changes" hangs off this. */
+function updateDirtyUi() {
+    const dirty = isDirty();
+    ['lay-dirty', 'rules-dirty'].forEach((id) => { const el = $(id); if (el) el.classList.toggle('hidden', !dirty); });
+    ['lay-save', 'lay-revert'].forEach((id) => { const el = $(id); if (el) el.disabled = !dirty; });
+    const banner = $('run-dirty');
+    if (banner) banner.classList.toggle('hidden', !dirty);
+}
+
+function rulesChanged() {
+    updateDirtyUi();
+    if (window.Layout) window.Layout.onRulesChanged();
+}
+
+function renderRules() { renderRulesInner(); rulesChanged(); }
+
+function revertAll() {
+    state.rules = JSON.parse(state.savedRules);
+    state.options.defaults = JSON.parse(state.savedDefaults);
+    renderDefaults();
+    renderRules();
+    toast('Reverted to the saved rules.');
+}
+window.revertAll = revertAll;
+
+$('revert-rules').addEventListener('click', revertAll);
+
+async function saveAll() {
+    const blanks = state.rules.filter(isBlank).length;
+    const clean = cleanRules();
+
+    const options = {
+        delay: Number($('opt-delay').value) || 0.8,
+        keep_free: Number($('opt-keepfree').value) || 0,
+        protect_gear: $('opt-gear').checked,
+        protect: $('opt-protect').value.split('\n')
+            .map((s) => s.trim()).filter(Boolean),
+        defaults: state.options.defaults,
+    };
+
+    const data = await call('settings', {
+        method: 'POST',
+        body: JSON.stringify({ rules: clean, options: options }),
     });
-    
-    // Restore the previous selection if it's still valid
-    if (state.settings.mule_bag && state.settings.enabled_bags[state.settings.mule_bag]) {
-        select.value = state.settings.mule_bag;
-    } else if (currentValue && state.settings.enabled_bags[currentValue]) {
-        select.value = currentValue;
+    applySettings(data);
+    if (data.dropped && data.dropped.length) {
+        toast('Saved, but dropped: ' + data.dropped.join('; '), 'warn');
+    } else if (blanks) {
+        toast(`Saved. ${blanks} blank rule(s) were skipped: give a rule a name or category.`, 'warn');
     } else {
-        select.value = '';
+        toast('Saved to ' + (data.saved_to || 'the rule file'), 'ok');
     }
 }
 
-async function saveBagSettings() {
-    state.settings.move_delay = parseFloat($('#move-delay').value) || 0.7;
-    // Send '' (empty string) rather than null so the Lua backend reliably
-    // clears the mule bag — JSON null can decode to an absent key in Lua.
-    state.settings.mule_bag = $('#mule-bag').value || '';
-    try {
-        const res = await api('settings', 'POST', {
-            enabled_bags: state.settings.enabled_bags,
-            rules: state.settings.rules,
-            move_delay: state.settings.move_delay,
-            mule_bag: state.settings.mule_bag,
-        });
-        if (res.ok) {
-            state.settings = res.settings;
-            toast('Bag settings saved.', 'ok');
-            loadStatus();
-        } else {
-            toast('Save failed: ' + (res.error || 'unknown'), 'err');
-        }
-    } catch (e) {
-        toast('Save failed — add-on unreachable.', 'err');
-    }
+window.saveAll = saveAll;
+
+$('save-rules').addEventListener('click', () => saveAll().catch((e) => toast(e.message, 'bad')));
+$('save-options').addEventListener('click', () => saveAll().catch((e) => toast(e.message, 'bad')));
+
+/* ---------------------------------------------------------- built-in defaults */
+
+function renderDefaults() {
+    const info = state.defaultsInfo;
+    const d = state.options.defaults || {};
+    const box = $('def-groups');
+    if (!info || !box) return;
+
+    $('def-enabled').checked = d.enabled !== false;
+    box.classList.toggle('off', d.enabled === false);
+
+    const free = d.inventory_free;
+    const opts = ['auto', 5, 10, 15, 20, 25, 30, 40];
+    if (typeof free === 'number' && opts.indexOf(free) === -1) opts.push(free);
+    $('def-free').innerHTML = opts.map((o) => {
+        const label = o === 'auto' ? `auto (${info.inventory_free_effective})` : String(o);
+        return `<option value="${o}"${o === free ? ' selected' : ''}>${esc(label)}</option>`;
+    }).join('');
+
+    box.innerHTML = info.groups.map((g) => {
+        const on = d[g.id] !== false;
+        const chain = g.chain.map((c) =>
+            `<span class="link${c.available ? '' : ' na'}" title="${c.available ? '' : 'Not accessible right now'}">${esc(c.name)}</span>`
+        ).join('<span class="arrow">›</span>');
+        return `<div class="def-row${on ? '' : ' off'}">
+            <label class="check"><input type="checkbox" data-group="${esc(g.id)}"${on ? ' checked' : ''}>
+                <strong>${esc(g.label)}</strong></label>
+            ${g.soft ? '<span class="tag">only if Inventory is crowded</span>' : ''}
+            ${g.keep ? '<span class="tag">stays put</span>' : ''}
+            <div class="muted">${esc(g.description)}</div>
+            ${chain ? `<div class="chain">${chain}</div>` : ''}
+        </div>`;
+    }).join('');
 }
 
-// Ask the game which bags are accessible right now. The backend auto-enables
-// any newly-seen bags (leaving your manual choices untouched) and returns the
-// refreshed settings. We then re-render toggles + status so the badges update.
-async function detectBags() {
-    const btn = $('#settings-detect');
-    if (btn) { btn.disabled = true; btn.textContent = '🔍 Detecting…'; }
-    try {
-        const res = await api('detect', 'POST', {});
-        if (res.ok) {
-            if (res.settings) state.settings = res.settings;
-            const n = (res.newly && res.newly.length) || 0;
-            toast(n > 0
-                ? `Detected & enabled ${n} new bag(s).`
-                : 'Scan complete — no new bags found.', 'ok');
-            await loadStatus();      // refreshes catalog + availability badges
-            renderBagToggles();
-            populateMuleBagDropdown();
-        } else {
-            toast('Detection failed: ' + (res.error || 'unknown'), 'err');
-        }
-    } catch (e) {
-        toast('Detection failed — add-on unreachable.', 'err');
-    } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '🔍 Auto-detect bags'; }
-    }
-}
+$('def-enabled').addEventListener('change', (e) => {
+    state.options.defaults.enabled = e.target.checked;
+    renderDefaults(); rulesChanged();
+});
+$('def-free').addEventListener('change', (e) => {
+    const v = e.target.value;
+    state.options.defaults.inventory_free = v === 'auto' ? 'auto' : Number(v);
+    rulesChanged();
+});
+$('def-groups').addEventListener('change', (e) => {
+    const g = e.target.dataset && e.target.dataset.group;
+    if (!g) return;
+    state.options.defaults[g] = e.target.checked;
+    renderDefaults(); rulesChanged();
+});
 
-/* ------------------------------------------------------------------ */
-/* Tab 3: Sort Rules                                                   */
-/* ------------------------------------------------------------------ */
+/* ---------------------------------------------------------------- settings */
 
-function populateTargetDropdowns() {
-    const targets = state.catalog; // all bags valid as targets
-    const targetSel = $('#new-rule-target');
-    targetSel.innerHTML = '';
-    targets.forEach(b => targetSel.appendChild(el('option', { value: b.key }, b.name)));
-    // #new-rule-category is hardcoded in HTML with optgroups — do not repopulate here.
-}
+function applySettings(data) {
+    state.rules = (data.rules || []).map((r) => Object.assign({}, r));
+    state.savedRules = JSON.stringify(state.rules);
+    state.options = data.options || {};
+    state.options.defaults = state.options.defaults || {};
+    state.savedDefaults = JSON.stringify(state.options.defaults);
+    state.defaultsInfo = data.defaults || null;
+    state.categories = data.categories || [];
+    state.slots = data.slots || [];
+    state.catalog = data.bags || [];
 
-function initRuleForm() {
-    $('#add-rule').addEventListener('click', () => {
-        const category = $('#new-rule-category').value || 'ALL';
-        const wildcard = $('#new-rule-wildcard').value.trim();
-        const target = $('#new-rule-target').value;
-        // Require at least one meaningful filter: a specific category OR a name wildcard.
-        if (category === 'ALL' && !wildcard) {
-            toast('Pick a specific category or enter a name filter (or both).', 'err');
-            return;
-        }
-        state.settings.rules.push({ category, wildcard, target });
-        $('#new-rule-wildcard').value = '';
-        renderRules();
-        toast('Rule added (remember to Save).');
-    });
-}
+    $('character').textContent = data.character || '—';
+    $('rule-file').textContent = data.rule_file || '';
+    $('opt-delay').value = state.options.delay ?? 0.8;
+    $('opt-keepfree').value = state.options.keep_free ?? 0;
+    $('opt-gear').checked = state.options.protect_gear !== false;
+    $('opt-protect').value = (state.options.protect || []).join('\n');
+    $('opt-icons').checked = state.showIcons;
+    $('gear-count').textContent = data.gear_protected
+        ? `Currently protecting ${data.gear_protected} item(s).` : '';
 
-function renderRules() {
-    const body = $('#rules-body');
-    body.innerHTML = '';
-    const rules = state.settings.rules || [];
-    if (!rules.length) {
-        body.appendChild(el('tr', {}, el('td', { colspan: '5', class: 'empty' }, 'No rules yet. Add one above.')));
-        return;
-    }
-    const WEAPON_SLOTS = new Set(['Main', 'Sub', 'Ranged', 'Ammo']);
-    const ARMOR_SLOTS  = new Set(['Head', 'Body', 'Hands', 'Legs', 'Feet', 'Neck', 'Waist', 'Earring', 'Ring', 'Back']);
-    rules.forEach((r, i) => {
-        const cat = r.category || 'ALL';
-        let tagClass = 'tag-all';
-        if (WEAPON_SLOTS.has(cat)) tagClass = 'tag-weapon';
-        else if (ARMOR_SLOTS.has(cat)) tagClass = 'tag-armor';
-        else if (cat !== 'ALL') tagClass = 'tag-misc';
-        const catTag = el('span', { class: 'tag ' + tagClass }, cat);
+    const sel = $('preview-bag');
+    sel.innerHTML = '<option value="">All bags</option>' +
+        state.catalog.filter((b) => b.available)
+            .map((b) => `<option value="${esc(b.key)}">${esc(b.name)}</option>`).join('');
 
-        const targetSel = el('select');
-        state.catalog.forEach(b => {
-            const opt = el('option', { value: b.key }, b.name);
-            if (b.key === r.target) opt.selected = true;
-            targetSel.appendChild(opt);
-        });
-        targetSel.addEventListener('change', () => { r.target = targetSel.value; });
-
-        const upBtn = el('button', { class: 'btn btn-ghost btn-sm', title: 'Move up' }, '↑');
-        upBtn.addEventListener('click', () => { if (i > 0) { swapRule(i, i - 1); } });
-        const downBtn = el('button', { class: 'btn btn-ghost btn-sm', title: 'Move down' }, '↓');
-        downBtn.addEventListener('click', () => { if (i < rules.length - 1) { swapRule(i, i + 1); } });
-        const delBtn = el('button', { class: 'btn btn-danger btn-sm' }, 'Delete');
-        delBtn.addEventListener('click', () => { rules.splice(i, 1); renderRules(); });
-
-        body.appendChild(el('tr', {},
-            el('td', {}, String(i + 1)),
-            el('td', {}, catTag),
-            el('td', { class: 'mono' }, r.wildcard || '—'),
-            el('td', {}, targetSel),
-            el('td', {}, upBtn, downBtn, delBtn),
-        ));
-    });
-}
-
-function swapRule(a, b) {
-    const r = state.settings.rules;
-    [r[a], r[b]] = [r[b], r[a]];
+    (data.problems || []).forEach((p) => toast('Rule file: ' + p, 'warn'));
+    renderDefaults();
     renderRules();
 }
 
-async function saveRules() {
+$('opt-icons').addEventListener('change', (e) => {
+    state.showIcons = e.target.checked;
+    localStorage.setItem('autosort.icons', String(state.showIcons));
+    renderBags();
+});
+
+/* ------------------------------------------------------------ preview / run */
+
+async function doPreview() {
     try {
-        const res = await api('settings', 'POST', {
-            enabled_bags: state.settings.enabled_bags,
-            rules: state.settings.rules,
-            move_delay: state.settings.move_delay,
+        const bag = $('preview-bag').value;
+        const data = await call('preview', {
+            method: 'POST',
+            body: JSON.stringify({ bag: bag || undefined }),
         });
-        if (res.ok) {
-            state.settings = res.settings;
-            renderRules();
-            toast('Rules saved.', 'ok');
-        } else {
-            toast('Save failed: ' + (res.error || 'unknown'), 'err');
-        }
-    } catch (e) {
-        toast('Save failed — add-on unreachable.', 'err');
+        renderPreview(data);
+        $('do-execute').disabled = data.moves.length === 0;
+    } catch (err) {
+        toast(err.message, 'bad');
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Tab 4: Preview & Execute                                            */
-/* ------------------------------------------------------------------ */
+function renderPreview(p) {
+    $('move-count').textContent = p.moves.length;
+    $('issue-count').textContent = p.blocked.length + p.skipped.length;
 
-async function generatePreview() {
+    const parts = [`<strong>${p.moves.length}</strong> move(s)`];
+    if (p.blocked.length) parts.push(`<span class="bad">${p.blocked.length} blocked</span>`);
+    if (p.skipped.length) parts.push(`${p.skipped.length} protected or equipped`);
+    if (p.unmatched) parts.push(`${p.unmatched} matched no rule`);
+    if (p.inventory) parts.push(`Inventory ${p.inventory.free_before} free now, ${p.inventory.free_after} after (target ${p.inventory.target})`);
+    $('preview-summary').innerHTML = parts.join(' &middot; ') +
+        (p.warnings || []).map((w) => `<div class="warn">${esc(w)}</div>`).join('');
+
+    $('move-list').innerHTML = p.moves.length ? p.moves.map((m) => `
+        <div class="row">
+            ${iconFor(m.item_id)}
+            <span class="nm">${esc(m.name)}${m.count > 1 ? ` x${m.count}` : ''}</span>
+            <span class="muted">${esc(m.from_name)} → <strong>${esc(m.to_name)}</strong></span>
+            <span class="tag ${m.source === 'user' ? 'yours' : ''}">${m.source === 'user' ? 'your rule' : esc(String(m.rule_label || 'default').replace('default: ', ''))}</span>
+            ${m.parked ? '<span class="tag">staging</span>' : ''}
+            ${m.hops === 2 ? '<span class="tag">2 hops</span>' : ''}
+        </div>`).join('')
+        : '<p class="empty">Nothing to move.</p>';
+
+    $('capacity-list').innerHTML = (p.capacity || [])
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((c) => {
+            const pct = c.max ? Math.round((c.after / c.max) * 100) : 0;
+            const delta = c.after - c.before;
+            return `<div class="row">
+                <span class="nm">${esc(c.name)}</span>
+                <span class="muted">${c.before} → ${c.after} / ${c.max}
+                    ${delta ? `<span class="${delta > 0 ? 'up' : 'down'}">${delta > 0 ? '+' : ''}${delta}</span>` : ''}</span>
+                <div class="meter${c.over ? ' over' : ''}"><div style="width:${Math.min(100, pct)}%"></div></div>
+            </div>`;
+        }).join('');
+
+    const issues = p.blocked.map((b) => `
+        <div class="row bad-row">${iconFor(b.item_id)}
+            <span class="nm">${esc(b.name)}</span>
+            <span class="muted">${esc(b.reason)}</span></div>`)
+        .concat(p.skipped.map((s) => `
+        <div class="row">${iconFor(s.item_id)}
+            <span class="nm">${esc(s.name)}</span>
+            <span class="muted">${esc(s.reason)}</span></div>`));
+    $('issue-list').innerHTML = issues.join('') ||
+        '<p class="empty">Nothing blocked.</p>';
+}
+
+async function doExecute() {
+    if (!confirm('Execute this sort? Items will be moved in game.')) return;
     try {
-        const res = await api('preview', 'POST');
-        if (!res.ok) { toast('Preview failed.', 'err'); return; }
-        state.plan = res.plan;
-        renderPlan(res.plan);
-        $('#execute-sort').disabled = (res.plan.moves.length === 0);
-        toast(`Preview: ${res.plan.moves.length} move(s).`, 'ok');
-    } catch (e) {
-        toast('Preview failed — add-on unreachable.', 'err');
+        const data = await call('execute', { method: 'POST' });
+        if (!data.total) { toast(data.message || 'Nothing to move.'); return; }
+        $('progress-wrap').classList.remove('hidden');
+        $('do-execute').disabled = true;
+        $('do-stop').disabled = false;
+        watchProgress();
+    } catch (err) {
+        toast(err.message, 'bad');
     }
 }
 
-function renderPlan(plan) {
-    // Warnings
-    const warnBox = $('#preview-warnings');
-    if (plan.warnings && plan.warnings.length) {
-        warnBox.classList.remove('hidden');
-        warnBox.innerHTML = '<strong>Warnings</strong><ul>' +
-            plan.warnings.map(w => `<li>${esc(w)}</li>`).join('') + '</ul>';
-    } else {
-        warnBox.classList.add('hidden');
-        warnBox.innerHTML = '';
-    }
-
-    // Moves
-    const body = $('#moves-body');
-    body.innerHTML = '';
-    $('#move-count').textContent = plan.moves.length;
-    if (!plan.moves.length) {
-        body.appendChild(el('tr', {}, el('td', { colspan: '6', class: 'empty' }, 'No moves — everything is already sorted or unmatched.')));
-    } else {
-        const muleBag = state.settings.mule_bag;
-        plan.moves.forEach(m => {
-            const isMuleItem = muleBag && m.to === muleBag;
-            const rowClass = isMuleItem ? 'mule-row' : '';
-            const toNameDisplay = isMuleItem ? m.to_name + ' 📦' : m.to_name;
-            const nameCell = el('td', {},
-                el('span', { class: 'item-name-cell' }, makeIcon(m), el('span', {}, m.name)));
-            attachTip(nameCell, m);
-            body.appendChild(el('tr', { class: rowClass },
-                nameCell,
-                el('td', { class: 'item-qty' }, '×' + m.count),
-                el('td', {}, m.from_name),
-                el('td', { class: 'move-arrow' }, '→'),
-                el('td', {}, toNameDisplay),
-                el('td', {}, el('span', { class: 'hop-badge hop-' + m.hops }, m.hops + (m.hops === 1 ? ' hop' : ' hops'))),
-            ));
-        });
-    }
-
-    // Capacity
-    const capWrap = $('#capacity-list');
-    capWrap.innerHTML = '';
-    const caps = plan.capacity || {};
-    const keys = Object.keys(caps);
-    if (!keys.length) {
-        capWrap.appendChild(el('div', { class: 'empty' }, 'No capacity data.'));
-    } else {
-        keys.forEach(k => {
-            const c = caps[k];
-            const pct = c.pct;
-            const cls = pctClass(pct);
-            const overLabel = c.over ? el('span', { class: 'over' }, 'OVER CAPACITY') : el('span', {}, pct + '%');
-            capWrap.appendChild(el('div', { class: 'cap-card' },
-                el('div', { class: 'cap-head' }, el('strong', {}, c.name), overLabel),
-                el('div', { class: 'progress-bar' },
-                    el('div', { class: 'progress-fill ' + cls, style: `width:${Math.min(100, pct)}%` })),
-                el('div', { class: 'cap-delta' }, `${c.before} → ${c.after} / ${c.max} slots`),
-            ));
-        });
-    }
-
-    // Unmatched
-    const unWrap = $('#unmatched-list');
-    unWrap.innerHTML = '';
-    $('#unmatched-count').textContent = (plan.unmatched || []).length;
-    if (!plan.unmatched || !plan.unmatched.length) {
-        unWrap.appendChild(el('div', { class: 'empty' }, '—'));
-    } else {
-        plan.unmatched.forEach(u => {
-            unWrap.appendChild(el('span', { class: 'chip' }, `${u.name} ×${u.count} (${u.bag_name})`));
-        });
-    }
-}
-
-async function executeSort() {
-    if (!state.plan) { toast('Generate a preview first.', 'err'); return; }
-    try {
-        const res = await api('execute', 'POST');
-        if (!res.ok) { toast(res.error || 'Execute failed.', 'err'); return; }
-        $('#exec-progress').classList.remove('hidden');
-        $('#execute-sort').disabled = true;
-        $('#stop-sort').classList.remove('hidden');
-        pollProgress();
-    } catch (e) {
-        toast('Execute failed — add-on unreachable.', 'err');
-    }
-}
-
-function pollProgress() {
+function watchProgress() {
     clearInterval(state.progressTimer);
     state.progressTimer = setInterval(async () => {
         try {
-            const p = await api('progress');
-            const total = p.total || 0;
-            const done = p.completed || 0;
-            const pct = total ? Math.floor((done / total) * 100) : 100;
-            $('#progress-fill').style.width = pct + '%';
-            $('#progress-text').textContent = `${done} / ${total} moves`;
-            $('#progress-log').textContent = (p.log || []).join('\n');
-            $('#progress-log').scrollTop = $('#progress-log').scrollHeight;
+            const p = await call('progress');
+            const pct = p.total ? Math.round(((p.completed + p.failed) / p.total) * 100) : 0;
+            $('progress-bar').style.width = pct + '%';
+            $('progress-text').textContent =
+                `${p.completed} moved, ${p.failed} failed, of ${p.total}`;
+            $('progress-log').textContent = (p.log || []).slice(-40).join('\n');
+
             if (!p.running) {
                 clearInterval(state.progressTimer);
-                $('#stop-sort').classList.add('hidden');
-                $('#execute-sort').disabled = false;
-                toast('Sort finished.', 'ok');
+                $('do-stop').disabled = true;
+                toast(p.aborted ? 'Sort stopped.'
+                    : `Done: ${p.completed} moved, ${p.failed} failed.`,
+                    p.failed ? 'warn' : 'ok');
                 loadStatus();
+                doPreview();
             }
-        } catch (e) {
+        } catch (err) {
             clearInterval(state.progressTimer);
-            $('#stop-sort').classList.add('hidden');
+            toast('Lost contact with the add-on.', 'bad');
         }
-    }, 700);
+    }, 600);
 }
 
-async function stopSort() {
-    try { await api('stop', 'POST'); } catch (e) {}
-    clearInterval(state.progressTimer);
-    $('#stop-sort').classList.add('hidden');
-    $('#execute-sort').disabled = false;
-    toast('Sort stopped.');
-}
-
-/* ------------------------------------------------------------------ */
-/* Bootstrap                                                           */
-/* ------------------------------------------------------------------ */
-
-async function loadSettings() {
-    try {
-        const res = await api('settings');
-        setConn(true);
-        state.settings = res.settings;
-        state.catalog = res.catalog || [];
-        state.categories = res.categories || [];
-        $('#move-delay').value = state.settings.move_delay ?? 0.7;
-        populateTargetDropdowns();
-        populateMuleBagDropdown();
-        renderBagToggles();
-        renderRules();
-    } catch (e) {
-        setConn(false);
-        toast('Could not load settings — is AutoSort loaded in-game?', 'err');
-    }
-}
-
-function initButtons() {
-    $('#status-refresh').addEventListener('click', loadStatus);
-    $('#global-refresh').addEventListener('click', () => { loadSettings(); loadStatus(); });
-    $('#settings-save').addEventListener('click', saveBagSettings);
-    $('#settings-detect').addEventListener('click', detectBags);
-    $('#rules-save').addEventListener('click', saveRules);
-    $('#add-rule') && null; // wired in initRuleForm
-    $('#generate-preview').addEventListener('click', generatePreview);
-    $('#execute-sort').addEventListener('click', executeSort);
-    $('#stop-sort').addEventListener('click', stopSort);
-}
-
-document.addEventListener('DOMContentLoaded', async () => {
-    initTabs();
-    initButtons();
-    initRuleForm();
-    await loadSettings();
-    await loadStatus();
+$('do-preview').addEventListener('click', doPreview);
+$('do-execute').addEventListener('click', doExecute);
+$('do-stop').addEventListener('click', async () => {
+    try { await call('stop', { method: 'POST' }); } catch (e) { toast(e.message, 'bad'); }
 });
+
+/* -------------------------------------------------------------------- boot */
+
+(async function init() {
+    if (!TOKEN) {
+        document.body.innerHTML =
+            '<p class="empty">Missing session token. Open this page with ' +
+            '<code>//as open</code> in game rather than by typing the address.</p>';
+        return;
+    }
+    try {
+        applySettings(await call('settings'));
+        await loadStatus();
+        const p = await call('progress');
+        if (p.running) {
+            $('progress-wrap').classList.remove('hidden');
+            $('do-stop').disabled = false;
+            watchProgress();
+        }
+    } catch (err) {
+        $('conn').textContent = 'disconnected';
+        $('conn').className = 'conn bad';
+        toast('Could not reach the add-on: ' + err.message, 'bad');
+    }
+})();
