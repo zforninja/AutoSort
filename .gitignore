@@ -1,7 +1,10 @@
 # AutoSort — Windower 4 Lua add-on
 
-# User-specific saved settings (bags + rules). Do not commit personal config.
+# User-specific saved settings and per-character rule files. Do not commit
+# personal config. Keep the data/ folder itself via .gitkeep.
 data/settings.json
+data/*.lua
+!data/.gitkeep
 
 # Windower / Lua runtime artifacts
 *.log

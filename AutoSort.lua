@@ -1,295 +1,639 @@
 --[[
-    AutoSort — Automatic FFXI inventory sorting for Windower 4.
+    AutoSort — rule-driven inventory sorting for Windower 4.
 
-    Sorts items across every storage container using user-defined rules,
-    driven by a local Web UI. Because FFXI forbids moving an item directly
-    between two non-Inventory bags, all transfers are routed through Inventory
-    as an intermediate.
+    Commands (//autosort or //as):
+        preview [bag]   show what a sort would do, without moving anything
+        sort [bag]      preview, then ask for confirmation before moving
+        go [bag]        sort with no confirmation
+        stop            abort a running sort
+        status          slot usage for every accessible bag
+        rules           list the loaded rules
+        setup           create a starter rule file for this character
+        reload          re-read the rule file
+        gear            re-scan GearSwap files for protected gear
+        defaults        show or change the built-in default rules
+        explain <item>  say what a sort would do with an item, and why
+        check           report how your items are being categorized
 
-    Commands:
-        //autosort open     Open the Web UI in your default browser.
-        //autosort reload   Reload settings from data/settings.json.
-        //autosort stop     Stop the HTTP server.
-        //autosort start    (Re)start the HTTP server.
-        //autosort url      Print the Web UI URL to chat.
-        //autosort detect   Re-scan accessible bags and auto-enable new ones.
-
-    Author: zforninja
+    Rules live in  data/<CharacterName>.lua  — see rules.lua for the format.
 ]]
 
-_addon.name     = 'AutoSort'
-_addon.author   = 'zforninja'
-_addon.version  = '1.0.0'
-_addon.commands = { 'autosort', 'asort' }
+_addon.name = 'AutoSort'
+_addon.author = 'zforninja'
+_addon.version = '2.2.0'
+_addon.commands = { 'autosort', 'as' }
 
-local config    = require('lib/config')
-local server    = require('lib/server')
-local sorter    = require('lib/sorter')
-local inventory = require('lib/inventory')
 local bags      = require('lib/bags')
+local items     = require('lib/items')
+local inventory = require('lib/inventory')
+local rules     = require('lib/rules')
+local baseline  = require('lib/baseline')
+local planner   = require('lib/planner')
+local executor  = require('lib/executor')
+local server    = require('lib/server')
+local api       = require('lib/api')
 
--- ---------------------------------------------------------------------------
--- Add-on state
--- ---------------------------------------------------------------------------
+local INFO, WARN, GOOD = 207, 123, 204
 
 local state = {
-    settings = nil,     -- current settings table
-    last_plan = nil,    -- most recently generated preview plan
+    config = nil,       -- loaded rule set for the current character
+    plan = nil,         -- last preview
+    plan_bag = nil,     -- source filter used for that preview
+    awaiting = false,   -- waiting on a yes/no confirmation
+    char = nil,
+    port = 9898,
 }
 
--- Chat colours for windower.add_to_chat.
-local COLOR_INFO = 207
-local COLOR_WARN = 123
-
-local function notify(msg)
-    windower.add_to_chat(COLOR_INFO, '[AutoSort] ' .. msg)
+local function say(msg, color)
+    windower.add_to_chat(color or INFO, '[AutoSort] ' .. msg)
 end
 
-local function warn(msg)
-    windower.add_to_chat(COLOR_WARN, '[AutoSort] ' .. msg)
+local function char_name()
+    local p = windower.ffxi.get_player()
+    return p and p.name or nil
 end
 
-local function ui_url()
-    return ('http://127.0.0.1:%d/'):format(state.settings and state.settings.port or 9898)
-end
-
--- Run live bag detection, auto-enable any newly-accessible bags exactly once,
--- persist, and announce what changed. Returns the detection map so callers can
--- hand it to the UI. Safe to call repeatedly.
-local function detect_and_apply(announce)
-    local detection = inventory.detect_available()
-    local _, newly = config.apply_detection(state.settings, detection)
-    config.save(state.settings)
-    state.settings = config.load()
-    if announce and #newly > 0 then
-        local names = {}
-        for _, key in ipairs(newly) do
-            local b = bags.get_by_key(key)
-            names[#names + 1] = b and b.name or key
-        end
-        notify(('Detected & enabled %d bag(s): %s'):format(#newly, table.concat(names, ', ')))
-    end
-    return detection, newly
+local function logged_in()
+    local info = windower.ffxi.get_info()
+    return info and info.logged_in
 end
 
 -- ---------------------------------------------------------------------------
--- API handlers (called from the HTTP server on the game thread)
+-- GearSwap protection
 -- ---------------------------------------------------------------------------
 
-local api = {}
+-- Scan the player's GearSwap files for item names and pin those items so a
+-- sort never pulls gear out from under a set. This is a text scan: it reads
+-- every quoted string in the character's GearSwap lua files and keeps the ones
+-- that match a real item name.
+local function scan_gearswap(char)
+    local ids = {}
+    if not char then return ids end
 
--- GET /api/status — inventory snapshot for enabled bags + full bag catalog.
-function api.status()
-    local snapshot = inventory.snapshot(state.settings.enabled_bags)
-    local detection = inventory.detect_available()
-    -- Catalog describes every bag (id/key/name/note) so the UI can render the
-    -- Bag Settings tab and show live slot counts even for disabled bags.
-    local catalog = {}
-    for _, b in ipairs(bags.list) do
-        local used, max = 0, b.max_slots
-        -- Only probe live counts for bags the game can currently read.
-        local ok, data = pcall(inventory.read_bag, b.id)
-        if ok then
-            used, max = data.used, data.max
-        end
-        local d = detection[b.key] or {}
-        catalog[#catalog + 1] = {
-            id = b.id, key = b.key, name = b.name, note = b.note,
-            enabled = state.settings.enabled_bags[b.key] and true or false,
-            available = d.available and true or false,
-            used = used, max = max,
-        }
-    end
-    return { ok = true, bags = snapshot, catalog = catalog }
-end
-
--- GET /api/settings
-function api.get_settings()
-    return {
-        ok = true,
-        settings = state.settings,
-        -- Provide the bag catalog + category list to populate dropdowns.
-        catalog = (function()
-            local c = {}
-            for _, b in ipairs(bags.list) do
-                c[#c + 1] = { key = b.key, name = b.name, id = b.id, note = b.note }
-            end
-            return c
-        end)(),
-        categories = { 'Weapon', 'Armor', 'Ranged', 'Ammo', 'Food', 'Usable', 'Crystal', 'Currency', 'General' },
+    local dir = windower.windower_path .. 'addons/GearSwap/data/'
+    local candidates = {
+        dir .. char .. '.lua',
     }
-end
-
--- POST /api/settings — persist enabled_bags + rules (+ optional port/delay).
-function api.save_settings(data)
-    -- Merge incoming fields onto the current settings.
-    if type(data.enabled_bags) == 'table' then
-        state.settings.enabled_bags = data.enabled_bags
-    end
-    if type(data.rules) == 'table' then
-        state.settings.rules = data.rules
-    end
-    if tonumber(data.move_delay) then
-        state.settings.move_delay = tonumber(data.move_delay)
-    end
-    if tonumber(data.port) then
-        state.settings.port = tonumber(data.port)
-    end
-    -- mule_bag may be a string (bag key) or explicit null to clear it.
-    if data.mule_bag ~= nil then
-        state.settings.mule_bag = (data.mule_bag == '' ) and nil or data.mule_bag
-    elseif data.clear_mule_bag then
-        state.settings.mule_bag = nil
-    end
-    if type(data.icon_base_url) == 'string' then
-        state.settings.icon_base_url = data.icon_base_url
-    end
-    if data.show_icons ~= nil then
-        state.settings.show_icons = data.show_icons and true or false
+    -- Job-specific files live under data/<Character>/<Char>_<JOB>.lua on many
+    -- setups; add the per-character folder if it exists.
+    local sub = dir .. char .. '/'
+    if windower.dir_exists and windower.dir_exists(sub) then
+        local ok, files = pcall(windower.get_dir, sub)
+        if ok and type(files) == 'table' then
+            for _, f in ipairs(files) do
+                if f:sub(-4) == '.lua' then candidates[#candidates + 1] = sub .. f end
+            end
+        end
     end
 
-    local ok, err = config.save(state.settings)
-    -- Reload the sanitized version back into memory.
-    state.settings = config.load()
-    if ok then
-        return { ok = true, settings = state.settings }
+    -- Build a name -> id index once.
+    local by_name = {}
+    local res = require('resources')
+    for id, r in pairs(res.items or {}) do
+        local n = r.en or r.english or r.name
+        if type(n) == 'string' then by_name[n:lower()] = id end
     end
-    return { ok = false, error = tostring(err) }
-end
 
--- POST /api/detect — run live bag detection and auto-enable newly-seen bags.
-function api.detect()
-    local detection, newly = detect_and_apply(false)
-    return { ok = true, settings = state.settings, detection = detection, newly = newly }
-end
-
--- POST /api/preview — build and cache a move plan.
-function api.preview()
-    local plan = sorter.build_plan(state.settings)
-    state.last_plan = plan
-    return { ok = true, plan = plan }
-end
-
--- POST /api/execute — begin executing the cached plan.
-function api.execute()
-    if not state.last_plan then
-        -- Build fresh if none cached.
-        state.last_plan = sorter.build_plan(state.settings)
+    local found = 0
+    for _, path in ipairs(candidates) do
+        if windower.file_exists(path) then
+            local fh = io.open(path, 'r')
+            if fh then
+                local text = fh:read('*a')
+                fh:close()
+                for quoted in text:gmatch('["\']([^"\']+)["\']') do
+                    local id = by_name[quoted:lower()]
+                    if id and not ids[id] then
+                        ids[id] = true
+                        found = found + 1
+                    end
+                end
+            end
+        end
     end
-    if sorter.exec.running then
-        return { ok = false, error = 'A sort is already running.' }
-    end
-    sorter.start(state.last_plan, state.settings.move_delay)
-    notify(('Executing sort: %d moves queued.'):format(#state.last_plan.moves))
-    return { ok = true, total = #state.last_plan.moves }
-end
-
--- GET /api/progress — current execution progress.
-function api.progress()
-    local p = sorter.progress()
-    p.ok = true
-    return p
-end
-
--- POST /api/stop — abort execution.
-function api.stop_sort()
-    sorter.stop()
-    return { ok = true }
+    return ids, found
 end
 
 -- ---------------------------------------------------------------------------
--- Server lifecycle
+-- Config loading
 -- ---------------------------------------------------------------------------
+
+local function load_config(quiet)
+    state.char = char_name()
+    state.config = rules.load(state.char)
+
+    if state.config.options.protect_gear then
+        local ids, found = scan_gearswap(state.char)
+        state.config.gear_ids = ids
+        if not quiet and found and found > 0 then
+            say(('Protecting %d item(s) referenced by GearSwap.'):format(found))
+        end
+    else
+        state.config.gear_ids = {}
+    end
+
+    for _, p in ipairs(state.config.problems) do
+        say('Rule problem: ' .. p, WARN)
+    end
+
+    if not quiet then
+        if not state.config.exists then
+            say('No rule file yet, so the built-in defaults apply. Try "//as preview".')
+            say('Add your own rules any time with "//as open" or "//as setup".')
+        else
+            say(('Loaded %d rule(s) for %s.'):format(#state.config.rules, tostring(state.char)))
+        end
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Web UI
+-- ---------------------------------------------------------------------------
+
+-- The api module reaches shared add-on state through these hooks rather than
+-- importing the add-on, which would be circular.
+api.host = {
+    get_config = function()
+        if not state.config then load_config(true) end
+        return state.config
+    end,
+    reload = function() load_config(true) end,
+    char_name = char_name,
+    set_plan = function(plan, bag) state.plan, state.plan_bag = plan, bag end,
+    get_plan_bag = function() return state.plan_bag end,
+}
 
 local function start_server()
-    local ok, err = server.start(state.settings.port, api)
+    local ok, err = server.start(state.port, api)
     if ok then
-        notify(('Web UI available at %s'):format(ui_url()))
-        notify('Type "//autosort open" to launch it in your browser.')
+        say('Web UI ready. Type "//as open" to launch it.')
     else
-        warn(('Could not start server on port %d: %s'):format(state.settings.port, tostring(err)))
-        warn('Change the port with "//autosort port <number>" then "//autosort start".')
+        say(('Could not start the Web UI on port %d: %s'):format(state.port, tostring(err)), WARN)
+        say('Try another port: "//as port 9899" then "//as start".', WARN)
     end
     return ok
+end
+
+-- ---------------------------------------------------------------------------
+-- Output
+-- ---------------------------------------------------------------------------
+
+local function show_plan(plan, verbose)
+    if #plan.moves == 0 then
+        say('Nothing to move.', GOOD)
+    else
+        say('Plan: ' .. planner.summary(plan), GOOD)
+        local shown = verbose and #plan.moves or math.min(#plan.moves, 15)
+        for i = 1, shown do
+            local m = plan.moves[i]
+            local tag = m.source == 'user' and ' [' .. tostring(m.rule_label) .. ']' or ''
+            say(('  %s x%d: %s -> %s%s'):format(m.name, m.count, m.from_name, m.to_name, tag))
+        end
+        if shown < #plan.moves then
+            say(('  ...and %d more. Use "//as preview all" to see everything.')
+                :format(#plan.moves - shown))
+        end
+    end
+
+    for _, b in ipairs(plan.blocked) do
+        say(('BLOCKED %s: %s'):format(b.item.name, b.reason), WARN)
+    end
+
+    if #plan.skipped > 0 then
+        local by_reason = {}
+        for _, sk in ipairs(plan.skipped) do
+            by_reason[sk.reason] = (by_reason[sk.reason] or 0) + 1
+        end
+        local parts = {}
+        for reason, n in pairs(by_reason) do parts[#parts + 1] = ('%d %s'):format(n, reason) end
+        table.sort(parts)
+        say('Left alone: ' .. table.concat(parts, '; ') .. '.')
+    end
+    if plan.unmatched_count > 0 then
+        say(('%d item(s) matched no rule and stay put.'):format(plan.unmatched_count))
+    end
+    if plan.inventory then
+        say(('Inventory: %d free now, %d after the sort (target %d).')
+            :format(plan.inventory.free_before, plan.inventory.free_after, plan.inventory.target))
+    end
+    for _, w in ipairs(plan.warnings) do say(w, WARN) end
+end
+
+-- ---------------------------------------------------------------------------
+-- Actions
+-- ---------------------------------------------------------------------------
+
+local function can_act()
+    if not logged_in() then
+        say('Not logged in.', WARN)
+        return false
+    end
+    if executor.state.running then
+        say('A sort is already running. Use "//as stop" to abort it.', WARN)
+        return false
+    end
+    if not state.config then load_config(true) end
+    local d = state.config.options.defaults
+    if #state.config.rules == 0 and not (d and d.enabled) then
+        say('Nothing to do: you have no rules and the built-in defaults are off.', WARN)
+        say('Turn them on with "//as defaults on".', WARN)
+        return false
+    end
+    return true
+end
+
+local function do_preview(bag_key, verbose)
+    if not can_act() then return nil end
+    if bag_key and not bags.get_by_key(bag_key) then
+        say('Unknown bag: ' .. bag_key, WARN)
+        return nil
+    end
+    local plan = planner.build(state.config, bag_key)
+    state.plan = plan
+    state.plan_bag = bag_key
+    show_plan(plan, verbose)
+    return plan
+end
+
+local function do_execute(plan)
+    executor.on_finish = function(p)
+        say(('Done: %d moved, %d failed.'):format(p.completed, p.failed),
+            p.failed > 0 and WARN or GOOD)
+        state.plan = nil
+    end
+    executor.on_log = function(line)
+        -- Only surface failures live; successes are summarized at the end.
+        if line:find('^FAILED') then say(line, WARN) end
+    end
+    if executor.start(plan, state.config.options) then
+        say(('Sorting: %d move(s). "//as stop" to abort.'):format(#plan.moves))
+    else
+        say('Nothing to do.')
+    end
 end
 
 -- ---------------------------------------------------------------------------
 -- Events
 -- ---------------------------------------------------------------------------
 
+-- A new user has no rule file, and nothing is wrong with that: the built-in
+-- defaults work on their own. Say so once, so it is clear the addon is ready.
+local function first_run_hint()
+    if state.config and not state.config.exists then
+        say('Ready. No rule file yet, so the built-in defaults apply.')
+        say('Try "//as preview" to see what a sort would do, or "//as open" for the Web UI.')
+    end
+end
+
 windower.register_event('load', function()
-    state.settings = config.load()
-    notify(('AutoSort v%s loaded.'):format(_addon.version))
-    -- Auto-detect accessible bags and enable any we haven't seen before. This
-    -- runs once per load; bags you've manually toggled off stay off.
-    detect_and_apply(true)
+    say(('v%s loaded. Type "//as" for commands.'):format(_addon.version))
+    if logged_in() then load_config(true); first_run_hint() end
     start_server()
 end)
 
-windower.register_event('unload', function()
-    server.stop()
-    sorter.stop()
+windower.register_event('login', function()
+    load_config(true)
+    first_run_hint()
 end)
 
--- Poll the HTTP server and advance any running sort once per frame.
+windower.register_event('logout', function()
+    executor.stop('logged out')
+    state.config, state.plan = nil, nil
+end)
+
+windower.register_event('zone change', function()
+    if executor.state.running then
+        executor.stop('zoned')
+    end
+    state.plan = nil
+end)
+
 windower.register_event('prerender', function()
     server.tick()
-    if sorter.exec.running then
-        sorter.tick()
+    if executor.state.running then
+        executor.tick()
     end
+end)
+
+windower.register_event('unload', function()
+    executor.stop('add-on unloaded')
+    server.stop()
 end)
 
 -- ---------------------------------------------------------------------------
 -- Commands
 -- ---------------------------------------------------------------------------
 
-windower.register_event('addon command', function(cmd, ...)
-    cmd = (cmd or 'open'):lower()
-    local args = { ... }
+local commands = {}
 
-    if cmd == 'open' then
-        windower.open_url(ui_url())
-        notify('Opening Web UI: ' .. ui_url())
+function commands.preview(arg)
+    local verbose = (arg == 'all')
+    do_preview(verbose and nil or arg, verbose)
+end
 
-    elseif cmd == 'url' then
-        notify('Web UI: ' .. ui_url())
+function commands.sort(arg)
+    local plan = do_preview(arg)
+    if not plan or #plan.moves == 0 then return end
+    state.awaiting = true
+    say('Type "//as yes" to run this, or "//as no" to cancel.', GOOD)
+end
 
-    elseif cmd == 'reload' then
-        state.settings = config.load()
-        notify('Settings reloaded.')
+function commands.yes()
+    if not state.awaiting or not state.plan then
+        say('Nothing waiting for confirmation.', WARN)
+        return
+    end
+    state.awaiting = false
+    -- Rebuild against live state: inventory may have changed since the preview.
+    local fresh = planner.build(state.config, state.plan_bag)
+    if #fresh.moves == 0 then
+        say('Nothing left to move.', GOOD)
+        return
+    end
+    if #fresh.moves ~= #state.plan.moves then
+        say(('Inventory changed: now %d move(s).'):format(#fresh.moves), WARN)
+    end
+    do_execute(fresh)
+end
 
-    elseif cmd == 'stop' then
-        server.stop()
-        sorter.stop()
-        notify('Server stopped.')
+function commands.no()
+    state.awaiting = false
+    state.plan = nil
+    say('Cancelled.')
+end
 
-    elseif cmd == 'start' then
-        server.stop()
-        start_server()
-
-    elseif cmd == 'port' then
-        local p = tonumber(args[1])
-        if p then
-            state.settings.port = p
-            config.save(state.settings)
-            notify('Port set to ' .. p .. '. Restart with "//autosort start".')
-        else
-            warn('Usage: //autosort port <number>')
+function commands.go(arg)
+    if not can_act() then return end
+    local plan = planner.build(state.config, arg)
+    if #plan.moves == 0 then
+        say('Nothing to move.', GOOD)
+        for _, b in ipairs(plan.blocked) do
+            say(('BLOCKED %s: %s'):format(b.item.name, b.reason), WARN)
         end
+        return
+    end
+    do_execute(plan)
+end
 
-    elseif cmd == 'detect' then
-        -- Re-scan accessible bags and auto-enable any newly-seen ones.
-        local _, newly = detect_and_apply(true)
-        if #newly == 0 then
-            notify('No new bags detected. Everything accessible is already known.')
-        end
-
-    elseif cmd == 'sort' then
-        -- Convenience: preview + execute from chat.
-        api.preview()
-        api.execute()
-
+function commands.stop(arg)
+    if arg == 'server' then
+        server.stop()
+        say('Web UI stopped.')
+        return
+    end
+    if executor.state.running then
+        executor.stop('cancelled')
+        say('Sort stopped.')
     else
-        notify('Commands: open | url | start | stop | reload | detect | port <n> | sort')
+        say('No sort is running.')
+    end
+end
+
+function commands.status()
+    if not logged_in() then say('Not logged in.', WARN) return end
+    say('Accessible bags:')
+    for _, bag in ipairs(inventory.snapshot()) do
+        say(('  %-18s %3d/%-3d  (%d free)'):format(
+            bag.name, bag.used, bag.max, bag.free))
+    end
+end
+
+function commands.rules()
+    if not state.config then load_config(true) end
+    if #state.config.rules == 0 then
+        say('You have no rules of your own; the built-in defaults apply. See "//as defaults".')
+        return
+    end
+    say(('Your rules for %s (first match wins, checked before the defaults):'):format(tostring(state.char)))
+    for i, r in ipairs(state.config.rules) do
+        local what = r.match or ('category ' .. tostring(r.category))
+        if r.match and r.category then
+            what = ('%s + %s'):format(r.match, r.category)
+        end
+        say(('  %2d. %-30s -> %s'):format(i, what, r.to))
+    end
+    local o = state.config.options
+    say(('Options: delay %.1fs, keep %d inventory slot(s) free, gear protection %s')
+        :format(o.delay, o.keep_free, o.protect_gear and 'on' or 'off'))
+end
+
+function commands.setup()
+    local char = char_name()
+    if not char then say('Log in first.', WARN) return end
+    local ok, result = rules.write_starter(char)
+    if ok then
+        say('Created ' .. result)
+        say('Edit it, then run "//as reload".')
+    else
+        say(result, WARN)
+    end
+end
+
+function commands.reload()
+    load_config(false)
+    state.plan = nil
+end
+
+function commands.gear()
+    if not state.char then state.char = char_name() end
+    local ids, found = scan_gearswap(state.char)
+    state.config = state.config or rules.load(state.char)
+    state.config.gear_ids = ids
+    say(('Found %d gear item(s) referenced by GearSwap.'):format(found or 0))
+end
+
+function commands.open()
+    if not server.running then
+        say('The Web UI is not running. Start it with "//as start".', WARN)
+        return
+    end
+    windower.open_url(server.url())
+    say('Opening the Web UI in your browser.')
+end
+
+function commands.url()
+    if not server.running then
+        say('The Web UI is not running.', WARN)
+        return
+    end
+    say('Web UI: ' .. server.url())
+    say('That address includes a one-time session key; it changes each restart.')
+end
+
+function commands.start()
+    start_server()
+end
+
+function commands.port(arg)
+    local p = tonumber(arg)
+    if not p or p < 1024 or p > 65535 then
+        say('Usage: //as port <1024-65535>', WARN)
+        return
+    end
+    state.port = p
+    say(('Port set to %d. Restarting the Web UI.'):format(p))
+    start_server()
+end
+
+--- Persist the current rules and options, then reload them.
+local function persist()
+    local char = char_name()
+    if not char then say('Log in first.', WARN) return false end
+    local ok, result = rules.save(char, {
+        rules = state.config.rules, options = state.config.options,
+    })
+    if not ok then say(tostring(result), WARN) return false end
+    load_config(true)
+    state.plan = nil
+    return true
+end
+
+function commands.defaults(arg, rest)
+    if not state.config then load_config(true) end
+    local d = state.config.options.defaults
+
+    -- Changing a setting: "defaults <group|all> on|off", "defaults on|off",
+    -- or "defaults free <n|auto>".
+    if arg == 'on' or arg == 'off' then
+        d.enabled = (arg == 'on')
+        if persist() then say('Built-in defaults ' .. (d.enabled and 'ON' or 'OFF') .. '.', GOOD) end
+        return
+    end
+    if arg == 'free' then
+        local v = rest[1]
+        if v == 'auto' then d.inventory_free = 'auto'
+        elseif tonumber(v) then d.inventory_free = math.max(0, math.floor(tonumber(v)))
+        else say('Usage: //as defaults free <number|auto>', WARN) return end
+        if persist() then say('Inventory free-slot target: ' .. tostring(d.inventory_free), GOOD) end
+        return
+    end
+    if arg and baseline.by_id[arg] then
+        local want = rest[1]
+        if want ~= 'on' and want ~= 'off' then
+            say(('Usage: //as defaults %s on|off'):format(arg), WARN)
+            return
+        end
+        d[arg] = (want == 'on')
+        if persist() then say(('Default group "%s" %s.'):format(arg, want:upper()), GOOD) end
+        return
+    end
+    if arg == 'all' and (rest[1] == 'on' or rest[1] == 'off') then
+        for _, g in ipairs(baseline.groups) do d[g.id] = (rest[1] == 'on') end
+        if persist() then say('All default groups ' .. rest[1]:upper() .. '.', GOOD) end
+        return
+    end
+
+    -- Otherwise just show them.
+    say('Built-in defaults are ' .. (d.enabled and 'ON' or 'OFF') ..
+        '. Your own rules always take priority.', d.enabled and GOOD or WARN)
+    local free = d.inventory_free
+    say(('Inventory free-slot target: %s'):format(
+        type(free) == 'number' and tostring(free) or 'auto (a quarter of Inventory)'))
+    local groups = baseline.describe(d, function(key)
+        local b = bags.get_by_key(key)
+        return b and inventory.available(b.id)
+    end)
+    for _, g in ipairs(groups) do
+        local chain = {}
+        for _, link in ipairs(g.chain) do
+            chain[#chain + 1] = link.available and link.key or ('(' .. link.key .. ')')
+        end
+        say(('  %-11s %-3s %s%s'):format(g.id, g.enabled and 'on' or 'off', g.label,
+            g.soft and ' [only if Inventory is crowded]' or ''))
+        if #chain > 0 then say('              -> ' .. table.concat(chain, ' > ')) end
+    end
+    say('Bags in (parentheses) are unavailable right now and are skipped.')
+    say('Change: //as defaults <group|all> on|off  |  //as defaults on|off  |  //as defaults free <n|auto>')
+end
+
+function commands.explain(arg, rest)
+    if not arg then say('Usage: //as explain <item name>', WARN) return end
+    if not logged_in() then say('Not logged in.', WARN) return end
+    if not state.config then load_config(true) end
+    local name = arg
+    for _, w in ipairs(rest or {}) do name = name .. ' ' .. w end
+
+    local r = planner.explain(state.config, name)
+    if not r then
+        say(('No item matching "%s" in any accessible bag.'):format(name), WARN)
+        return
+    end
+    say(('%s (%s, %s)'):format(r.item.name, r.bag, r.item.slot_name or r.item.category), GOOD)
+    if r.rule then say('  rule:    ' .. tostring(r.rule.label)) end
+    if r.chain and r.chain ~= '' then say('  options: ' .. r.chain) end
+    say('  result:  ' .. r.verdict)
+end
+
+function commands.check()
+    if not logged_in() then say('Not logged in.', WARN) return end
+    if not state.config then load_config(true) end
+    local counts, total, unknown = {}, 0, 0
+    local rule_list = rules.effective(state.config)
+    local by_group = {}
+    for _, bag in ipairs(inventory.snapshot()) do
+        for _, it in ipairs(bag.items) do
+            total = total + 1
+            counts[it.category] = (counts[it.category] or 0) + 1
+            if it.name:find('^Unknown') then unknown = unknown + 1 end
+            local rule = rules.match(it, rule_list)
+            local g = rule and (rule.group or rule.label) or 'no rule'
+            by_group[g] = (by_group[g] or 0) + 1
+        end
+    end
+    say(('Read %d item(s) across your accessible bags.'):format(total))
+    local cats = {}
+    for c, n in pairs(counts) do cats[#cats + 1] = ('%s %d'):format(c, n) end
+    table.sort(cats)
+    say('By category: ' .. table.concat(cats, ', '))
+    local groups = {}
+    for g, n in pairs(by_group) do groups[#groups + 1] = ('%s %d'):format(g, n) end
+    table.sort(groups)
+    say('By rule:     ' .. table.concat(groups, ', '))
+    if unknown > 0 then
+        say(('%d item(s) had no resource data and read as Unknown.'):format(unknown), WARN)
+    end
+    if (counts['General'] or 0) > total * 0.85 and total > 20 then
+        say('Almost everything reads as General. Item categories may not be')
+        say('detected on this Windower build; tell the developer the output above.', WARN)
+    end
+end
+
+function commands.help()
+    say('Commands:')
+    say('  preview [bag|all]  show planned moves without moving anything')
+    say('  sort [bag]         preview, then confirm with "//as yes"')
+    say('  go [bag]           sort immediately, no confirmation')
+    say('  stop               abort a running sort')
+    say('  status             slot usage per bag')
+    say('  rules              list loaded rules')
+    say('  setup              create a starter rule file')
+    say('  reload             re-read the rule file')
+    say('  gear               re-scan GearSwap for protected gear')
+    say('  defaults           show or change the built-in default rules')
+    say('  explain <item>     what would a sort do with this item, and why')
+    say('  check              how your items are being categorized')
+    say('  open               open the Web UI in your browser')
+    say('  url                print the Web UI address')
+    say('  start              restart the Web UI server')
+    say('  port <n>           change the Web UI port')
+end
+
+windower.register_event('addon command', function(cmd, ...)
+    cmd = (cmd or 'help'):lower()
+    local words = {}
+    for _, w in ipairs({ ... }) do words[#words + 1] = tostring(w):lower() end
+    local arg = words[1]
+    local rest = {}
+    for i = 2, #words do rest[#rest + 1] = words[i] end
+
+    local fn = commands[cmd]
+    if fn then
+        local ok, err = pcall(fn, arg, rest)
+        if not ok then
+            say('Error: ' .. tostring(err), WARN)
+        end
+    else
+        say('Unknown command: ' .. cmd, WARN)
+        commands.help()
     end
 end)
